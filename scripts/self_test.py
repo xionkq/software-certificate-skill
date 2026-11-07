@@ -25,6 +25,34 @@ def run(command: list[str]) -> dict:
     return {"command": command, "exit_code": result.returncode, "output": result.stdout.strip()}
 
 
+def multi_source_fixture(root: Path, name: str, file_count: int, lines_per_file: int) -> tuple[Path, Path]:
+    project = root / name
+    project.mkdir(parents=True, exist_ok=True)
+    ordered = []
+    for index in range(file_count):
+        relative = f"src/service_{index:03d}.py"
+        path = project / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "\n".join(f"value_{index}_{line} = process_item({line})" for line in range(1, lines_per_file + 1)) + "\n",
+            encoding="utf-8")
+        ordered.append(relative)
+    manifest = project / "manifest.json"
+    save_json(manifest, {
+        "include": ["**/*.py"],
+        "exclude": [],
+        "ordered_files": ordered,
+        "review": {
+            "confirmed_by": "self-test",
+            "confirmed_at": now_iso(),
+            "open_source_boundary_checked": True,
+            "generated_code_boundary_checked": True,
+            "secret_scan_checked": True
+        }
+    })
+    return project, manifest
+
+
 def source_fixture(root: Path, name: str, line_count: int) -> tuple[Path, Path]:
     project = root / name
     project.mkdir(parents=True, exist_ok=True)
@@ -172,16 +200,18 @@ def main() -> int:
 
     small_project, small_manifest = source_fixture(work, "source-small", 120)
     small_out = work / "source-small-output"
-    commands.append(run([
+    small_run = subprocess.run([
         sys.executable, str(skill / "scripts/compose_code.py"),
         "--project", str(small_project), "--manifest", str(small_manifest),
         "--output-dir", str(small_out)
-    ]))
+    ], text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if small_run.returncode != 3:
+        raise RuntimeError(f"Short source must block, got {small_run.returncode}: {small_run.stdout}")
     small = load_json(small_out / "source-provenance.json")
-    assert small["selection"] == "all_under_60_pages"
-    assert small["full_page_count"] == small["filing_page_count"] == 3
+    assert small["selection"] == "blocked"
+    assert not (small_out / "source-front.docx").is_file()
 
-    large_project, large_manifest = source_fixture(work, "source-large", 3051)
+    large_project, large_manifest = multi_source_fixture(work, "source-large", 80, 80)
     large_out = work / "source-large-output"
     commands.append(run([
         sys.executable, str(skill / "scripts/compose_code.py"),
@@ -189,13 +219,16 @@ def main() -> int:
         "--output-dir", str(large_out)
     ]))
     large = load_json(large_out / "source-provenance.json")
-    expected = list(range(1, 31)) + list(range(large["full_page_count"] - 29, large["full_page_count"] + 1))
-    assert large["selection"] == "first_30_and_last_30_separate_volumes"
-    assert large["filing_page_count"] == 60
-    assert large["filing_groups"]["front_30"]["logical_source_pages"] == expected[:30]
-    assert large["filing_groups"]["back_30"]["logical_source_pages"] == expected[30:]
-    assert (large_out / "source-front-30.docx").is_file()
-    assert (large_out / "source-back-30.docx").is_file()
+    front = large["filing_groups"]["front"]
+    back = large["filing_groups"]["back"]
+    assert large["selection"] == "file_aligned_front_back"
+    assert 55 <= front["page_count"] <= 65
+    assert 55 <= back["page_count"] <= 65
+    assert 120 <= front["page_count"] + back["page_count"] <= 125
+    assert set(front["files"]).isdisjoint(set(back["files"]))
+    assert large["gap_files"]
+    assert (large_out / "source-front.docx").is_file()
+    assert (large_out / "source-back.docx").is_file()
 
     report = {
         "generated_at": now_iso(),
@@ -210,8 +243,8 @@ def main() -> int:
             "manual_has_no_visible_internal_evidence_ids": True,
             "content_based_page_plan_small": True,
             "content_based_page_plan_complex": True,
-            "under_60_submits_all": True,
-            "at_least_60_selects_front_back_30": True,
+            "insufficient_source_blocks": True,
+            "file_aligned_volumes_hit_page_window": True,
             "source_provenance": True,
             "platform_independent_skill_validation": True,
             "screenshot_plan_validation": True,

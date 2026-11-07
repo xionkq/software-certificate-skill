@@ -30,6 +30,12 @@ class ProductEndToEndTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            for index in range(80):
+                module = project / "src" / f"service_{index:03d}.py"
+                module.write_text(
+                    "\n".join(f"value_{index}_{line} = normalize_text({line})" for line in range(80)) + "\n",
+                    encoding="utf-8",
+                )
             (project / "README.md").write_text(
                 "# 文本摘要命令行工具\n\n读取文本并输出规范化摘要。\n", encoding="utf-8"
             )
@@ -104,8 +110,10 @@ class ProductEndToEndTests(unittest.TestCase):
                 "申请表信息.txt",
                 "文本摘要命令行工具_操作手册.docx",
                 "文本摘要命令行工具_操作手册.pdf",
-                "文本摘要命令行工具-代码(全部).docx",
-                "文本摘要命令行工具-代码(全部).pdf",
+                "源代码（前30页）.docx",
+                "源代码（前30页）.pdf",
+                "源代码（后30页）.docx",
+                "源代码（后30页）.pdf",
             }
             self.assertEqual({path.name for path in formal.iterdir() if path.is_file()}, expected)
             self.assertEqual({path.name for path in output.iterdir()}, {"正式资料"})

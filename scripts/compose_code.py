@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Compose provenance-traceable source identification materials."""
+"""Compose provenance-traceable source identification materials.
+
+Filing volumes follow the accepted sample: A4, Calibri 10.5 pt with SimSun
+for Han characters, no page header, and a footer page number. The two
+volumes contain whole source files only, are not a continuous slice, and
+each lands in 55–65 pages with a combined 120–125 pages.
+"""
 
 from __future__ import annotations
 
 import argparse
 import fnmatch
+import os
 import unicodedata
 from pathlib import Path
 
@@ -12,46 +19,70 @@ from common import load_json, now_iso, relative_posix, safe_text, save_json, sha
 
 try:
     from docx import Document
-    from docx.enum.text import WD_LINE_SPACING, WD_TAB_ALIGNMENT
+    from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-    from docx.shared import Mm, Pt
+    from docx.shared import Mm, Pt, Twips
 except ImportError as exc:
     raise SystemExit("python-docx is required; use the bundled document runtime.") from exc
 
 
-# A4 filing geometry shared by line wrapping and DOCX writing.
+# Sample geometry: A4, top/bottom 1440 twips (25.4 mm), left/right 1800 twips (31.75 mm).
 PAGE_WIDTH_MM = 210.0
 PAGE_HEIGHT_MM = 297.0
-MARGIN_TOP_MM = 22.0
+MARGIN_TOP_MM = 25.4
 MARGIN_BOTTOM_MM = 25.4
-MARGIN_LEFT_MM = 20.0
-MARGIN_RIGHT_MM = 20.0
+MARGIN_LEFT_MM = 31.75
+MARGIN_RIGHT_MM = 31.75
 MM_TO_PT = 72.0 / 25.4
 CONTENT_WIDTH_PT = (PAGE_WIDTH_MM - MARGIN_LEFT_MM - MARGIN_RIGHT_MM) * MM_TO_PT
 CONTENT_HEIGHT_PT = (PAGE_HEIGHT_MM - MARGIN_TOP_MM - MARGIN_BOTTOM_MM) * MM_TO_PT
-ASCII_FONT = "Consolas"
+ASCII_FONT = "Calibri"
 EAST_ASIA_FONT = "SimSun"
-# Widest plausible monospace advance (em) across Consolas and its substitutes
-# (Liberation Mono / DejaVu Sans Mono / Courier family on LibreOffice), so a
-# pre-wrapped line never re-wraps in any rendering engine.
-ASCII_COLUMN_EM = 0.61
+FONT_SIZE_PT = 10.5  # 五号
+LINE_SPACING_TWIPS = 285  # sample w:spacing line="285" (14.25 pt)
+LINE_SPACING_PT = LINE_SPACING_TWIPS / 20.0
+# Leave 2 pt of slack so the last row cannot spill onto the next page.
+ROWS_PER_PAGE = max(1, (int(CONTENT_HEIGHT_PT * 20) - 40) // LINE_SPACING_TWIPS)
+VOLUME_PAGE_MIN = 55
+VOLUME_PAGE_MAX = 65
+TOTAL_PAGE_MIN = 120
+TOTAL_PAGE_MAX = 125
+TARGET_FRONT_PAGES = 60
+TARGET_BACK_PAGES = 62
+MAX_VOLUME_ROWS = VOLUME_PAGE_MAX * ROWS_PER_PAGE
+# Used only when Calibri/SimSun cannot be measured. Real advances come from the
+# installed faces so a normal source line is not broken early.
+FALLBACK_ADVANCE_PT = 11.0
+LATIN_ADVANCE_PT = FALLBACK_ADVANCE_PT
+CJK_ADVANCE_PT = FALLBACK_ADVANCE_PT
+WRAP_WIDTH_PT = CONTENT_WIDTH_PT - 2.0
 
-
-def exact_line_spacing_pt(lines_per_page: int) -> float:
-    """Exact leading that lets lines_per_page lines fill the page body.
-
-    Computed in whole twips with ~2pt slack per page so Word and LibreOffice
-    rounding can never push the last line onto the next page.
-    """
-    content_twips = int(CONTENT_HEIGHT_PT * 20)
-    return ((content_twips - 40) // lines_per_page) / 20.0
-
-
-def max_columns_for(font_size: float, requested: int) -> int:
-    fit = int(CONTENT_WIDTH_PT / (ASCII_COLUMN_EM * font_size))
-    return max(20, min(requested, fit))
-
+WINDOWS_FONTS = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+# Same faces as render_code_pdf.py. CFF collections such as Ubuntu NotoSansCJK
+# are omitted because reportlab's TTFont cannot parse them.
+CJK_CANDIDATES = [
+    (WINDOWS_FONTS / "simsun.ttc", 0),
+    (WINDOWS_FONTS / "simhei.ttf", None),
+    (WINDOWS_FONTS / "simfang.ttf", None),
+    (Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"), 0),
+    (Path("/usr/share/fonts/truetype/arphic/uming.ttc"), 0),
+    (Path("/System/Library/Fonts/STHeiti Light.ttc"), 0),
+]
+ASCII_CANDIDATES = [
+    (WINDOWS_FONTS / "calibri.ttf", None),
+    (WINDOWS_FONTS / "calibri.ttc", 0),
+    (Path("/usr/share/fonts/truetype/crosextra/Carlito-Regular.ttf"), None),
+    (Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"), None),
+    (Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"), None),
+    (Path("/System/Library/Fonts/Supplemental/Calibri.ttf"), None),
+]
+_MEASURE_ASCII = "SoftCertMeasureCalibri"
+_MEASURE_CJK = "SoftCertMeasureCJK"
+_ADVANCE_CACHE: dict[str, float] = {}
+_METRICS_READY = False
+_ASCII_FACE: str | None = None
+_CJK_FACE: str | None = None
 
 DEFAULT_EXTENSIONS = {
     ".py", ".cs", ".java", ".kt", ".js", ".jsx", ".ts", ".tsx", ".vue",
@@ -93,121 +124,158 @@ def select_files(root: Path, manifest: dict) -> list[Path]:
 
 
 def char_columns(character: str) -> int:
-    """Display columns of one character in a CJK-capable monospace grid."""
-    return 2 if unicodedata.east_asian_width(character) in ("W", "F", "A") else 1
+    """East-Asian width class, used to choose the CJK face for a character."""
+    return 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
 
 
-def wrap_source_line(line: str, max_columns: int) -> list[str]:
-    expanded = line.expandtabs(4).rstrip()
-    if not expanded:
+def _register_measure_font(logical_name: str, candidates: list[tuple[Path, int | None]],
+                           override_env: str) -> str | None:
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+    except ImportError:
+        return None
+    override = os.environ.get(override_env)
+    ordered = list(candidates)
+    if override:
+        path = Path(override)
+        ordered = [(path, 0 if path.suffix.lower() == ".ttc" else None)] + ordered
+    for path, subfont in ordered:
+        if not path.is_file():
+            continue
+        try:
+            if subfont is None:
+                pdfmetrics.registerFont(TTFont(logical_name, str(path)))
+            else:
+                pdfmetrics.registerFont(TTFont(logical_name, str(path), subfontIndex=subfont))
+            return logical_name
+        except Exception:
+            continue
+    return None
+
+
+def _ensure_measure_fonts() -> None:
+    global _METRICS_READY, _ASCII_FACE, _CJK_FACE
+    if _METRICS_READY:
+        return
+    _METRICS_READY = True
+    _ASCII_FACE = _register_measure_font(_MEASURE_ASCII, ASCII_CANDIDATES, "SOFTCERT_CODE_ASCII_FONT")
+    _CJK_FACE = _register_measure_font(_MEASURE_CJK, CJK_CANDIDATES, "SOFTCERT_CODE_CJK_FONT")
+
+
+def ascii_metrics_loaded() -> bool:
+    """True when wrap width comes from an installed Latin face, not the 11 pt fallback."""
+    _ensure_measure_fonts()
+    return _ASCII_FACE is not None
+
+
+def char_advance_pt(character: str) -> float:
+    cached = _ADVANCE_CACHE.get(character)
+    if cached is not None:
+        return cached
+    _ensure_measure_fonts()
+    face = _CJK_FACE if char_columns(character) == 2 else _ASCII_FACE
+    width = FALLBACK_ADVANCE_PT
+    if face is not None:
+        try:
+            from reportlab.pdfbase import pdfmetrics
+            measured = pdfmetrics.stringWidth(character, face, FONT_SIZE_PT)
+            if measured > 0:
+                width = measured
+        except Exception:
+            width = FALLBACK_ADVANCE_PT
+    _ADVANCE_CACHE[character] = width
+    return width
+
+
+def wrap_source_line(line: str) -> list[str]:
+    """Wrap one source line inside the content width without dropping characters."""
+    expanded = line.expandtabs(4)
+    if expanded == "":
         return [""]
     segments: list[str] = []
     current: list[str] = []
-    width = 0
+    width = 0.0
     for character in expanded:
-        columns = char_columns(character)
-        if current and width + columns > max_columns:
+        advance = char_advance_pt(character)
+        if current and width + advance > WRAP_WIDTH_PT:
             segments.append("".join(current))
-            current, width = [], 0
+            current, width = [], 0.0
         current.append(character)
-        width += columns
-    segments.append("".join(current))
-    return segments
+        width += advance
+    if current:
+        segments.append("".join(current))
+    return segments or [""]
 
 
-def collect_lines(root: Path, files: list[Path], max_chars: int) -> tuple[list[str], list[dict], list[dict], int]:
-    """Build the filing corpus: every material line is a non-empty code line.
+def page_count_for_rows(rows: int) -> int:
+    if rows <= 0:
+        return 0
+    return (rows + ROWS_PER_PAGE - 1) // ROWS_PER_PAGE
 
-    Reviewers read "每页不少于 50 行" as 50 lines of effective code, so blank
-    lines never enter the corpus — a page padded with blanks is the most
-    common reason code materials get returned for correction.
+
+def choose_filing_volumes(files: list[dict]) -> tuple[int, int] | None:
+    """Pick a prefix and a suffix of whole files.
+
+    Returns ``(front_end, back_start)`` where the front volume is
+    ``files[:front_end]``, the back volume is ``files[back_start:]``, and at
+    least one file sits between them. Page counts must be 55–65 each and
+    120–125 together. Prefer a pair that keeps backend files in both volumes
+    when the corpus has any, then the pair closest to 60 and 62 pages.
     """
-    output: list[str] = []
-    mapping: list[dict] = []
-    file_records: list[dict] = []
-    blank_lines = 0
-    for path in files:
-        text = safe_text(path, max_bytes=20_000_000)
-        if text is None:
+    count = len(files)
+    if count < 3:
+        return None
+    prefix = [0]
+    for item in files:
+        prefix.append(prefix[-1] + int(item["visual_rows"]))
+    has_backend = any(item.get("side") == "backend" for item in files)
+
+    def pages(start: int, end: int) -> int:
+        return page_count_for_rows(prefix[end] - prefix[start])
+
+    def covers_backend(start: int, end: int) -> bool:
+        return any(item.get("side") == "backend" for item in files[start:end])
+
+    ranked: list[tuple[tuple, int, int]] = []
+    for front_end in range(1, count):
+        front_pages = pages(0, front_end)
+        if front_pages > VOLUME_PAGE_MAX:
+            break
+        if front_pages < VOLUME_PAGE_MIN:
             continue
-        rel = relative_posix(path, root)
-        digest = sha256_file(path)
-        start = len(output) + 1
-        original_lines = text.splitlines()
-        for original_no, original in enumerate(original_lines, 1):
-            if not original.strip():
-                blank_lines += 1
+        for back_start in range(front_end + 1, count):
+            back_pages = pages(back_start, count)
+            if back_pages > VOLUME_PAGE_MAX:
                 continue
-            wrapped = wrap_source_line(original, max_chars)
-            for segment_no, segment in enumerate(wrapped, 1):
-                output.append(segment)
-                mapping.append({
-                    "output_line": len(output),
-                    "file": rel,
-                    "file_sha256": digest,
-                    "source_line": original_no,
-                    "segment": segment_no
-                })
-        file_records.append({
-            "path": rel,
-            "sha256": digest,
-            "original_lines": len(original_lines),
-            "output_start_line": start,
-            "output_end_line": len(output)
-        })
-    return output, mapping, file_records, blank_lines
+            if back_pages < VOLUME_PAGE_MIN:
+                break
+            total = front_pages + back_pages
+            if not (TOTAL_PAGE_MIN <= total <= TOTAL_PAGE_MAX):
+                continue
+            backend_miss = 0
+            if has_backend:
+                if not covers_backend(0, front_end):
+                    backend_miss += 1
+                if not covers_backend(back_start, count):
+                    backend_miss += 1
+            ranked.append((
+                (backend_miss, abs(front_pages - TARGET_FRONT_PAGES) + abs(back_pages - TARGET_BACK_PAGES),
+                 abs(total - (TARGET_FRONT_PAGES + TARGET_BACK_PAGES)), back_start - front_end),
+                front_end, back_start,
+            ))
+    if not ranked:
+        return None
+    covering = [item for item in ranked if item[0][0] == 0] if has_backend else ranked
+    pool = covering or ranked
+    pool.sort(key=lambda item: item[0])
+    return pool[0][1], pool[0][2]
 
 
-def group_logical_lines(lines: list[str], mapping: list[dict]) -> list[list[str]]:
-    """Group rendered rows into logical source lines (a wrap stays together)."""
-    groups: list[list[str]] = []
-    for text, meta in zip(lines, mapping):
-        if meta["segment"] == 1:
-            groups.append([])
-        groups[-1].append(text)
-    return groups
-
-
-def paginate(lines: list[str], mapping: list[dict], per_page: int) -> tuple[list[list[str]], int]:
-    """Fill each page to a shared row grid, never below `per_page` code lines.
-
-    Reviewers count effective source lines, so a long line wrapped over two
-    rows is still one line: paginating on rendered rows leaves most pages
-    short of the quota. The grid is sized so the page needing the most rows
-    still fits, then every page is packed full — pages without wraps simply
-    carry a few extra code lines instead of trailing blank space.
-    """
-    groups = group_logical_lines(lines, mapping)
-    if not groups:
-        return [], per_page
-    # Widest row count any `per_page` run of code lines can need.
-    grid = max(
-        sum(len(group) for group in groups[start:start + per_page])
-        for start in range(0, max(1, len(groups) - per_page + 1))
-    )
-    for _ in range(64):
-        pages: list[list[str]] = []
-        counts: list[int] = []
-        current: list[str] = []
-        logical = 0
-        for group in groups:
-            if current and len(current) + len(group) > grid:
-                pages.append(current)
-                counts.append(logical)
-                current, logical = [], 0
-            current.extend(group)
-            logical += 1
-        if current:
-            pages.append(current)
-            counts.append(logical)
-        if all(count >= per_page for count in counts[:-1]):
-            return pages, grid
-        grid += 1
-    return pages, grid
-
-
-def logical_line_count(page: list[str], mapping: list[dict], start_index: int) -> int:
-    return sum(1 for offset in range(len(page)) if mapping[start_index + offset]["segment"] == 1)
+def paginate_rows(rows: list[str]) -> list[list[str]]:
+    if not rows:
+        return []
+    return [rows[index:index + ROWS_PER_PAGE] for index in range(0, len(rows), ROWS_PER_PAGE)]
 
 
 def write_txt(path: Path, pages: list[list[str]]) -> None:
@@ -244,11 +312,18 @@ def set_page_number_start(section, start: int) -> None:
     pg_num_type.set(qn("w:start"), str(start))
 
 
-def write_docx(path: Path, pages: list[list[str]], facts: dict, rows_per_page: int,
-               font_size: float = 9.0, line_spacing: float | None = None,
-               page_number_start: int = 1, filing_total: int | None = None) -> None:
-    grid = exact_line_spacing_pt(rows_per_page)
-    spacing = min(line_spacing, grid) if line_spacing else grid
+def set_run_font(run) -> None:
+    run.font.name = ASCII_FONT
+    run.font.size = Pt(FONT_SIZE_PT)
+    fonts = run._element.get_or_add_rPr().get_or_add_rFonts()
+    fonts.set(qn("w:ascii"), ASCII_FONT)
+    fonts.set(qn("w:hAnsi"), ASCII_FONT)
+    fonts.set(qn("w:cs"), ASCII_FONT)
+    fonts.set(qn("w:eastAsia"), EAST_ASIA_FONT)
+
+
+def write_docx(path: Path, pages: list[list[str]], page_number_start: int = 1) -> None:
+    """Write code pages with an empty header and a centered footer page number."""
     doc = Document()
     section = doc.sections[0]
     section.page_width = Mm(PAGE_WIDTH_MM)
@@ -259,47 +334,139 @@ def write_docx(path: Path, pages: list[list[str]], facts: dict, rows_per_page: i
     section.right_margin = Mm(MARGIN_RIGHT_MM)
     section.header_distance = Mm(15)
     section.footer_distance = Mm(17.5)
+    section.different_first_page_header_footer = False
     set_page_number_start(section, page_number_start)
     normal = doc.styles["Normal"]
     normal.font.name = ASCII_FONT
-    normal._element.rPr.rFonts.set(qn("w:eastAsia"), EAST_ASIA_FONT)
-    normal.font.size = Pt(font_size)
+    normal.font.size = Pt(FONT_SIZE_PT)
+    normal_fonts = normal.element.get_or_add_rPr().get_or_add_rFonts()
+    normal_fonts.set(qn("w:ascii"), ASCII_FONT)
+    normal_fonts.set(qn("w:hAnsi"), ASCII_FONT)
+    normal_fonts.set(qn("w:cs"), ASCII_FONT)
+    normal_fonts.set(qn("w:eastAsia"), EAST_ASIA_FONT)
     normal.paragraph_format.space_before = Pt(0)
     normal.paragraph_format.space_after = Pt(0)
     normal.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-    normal.paragraph_format.line_spacing = Pt(spacing)
+    normal.paragraph_format.line_spacing = Twips(LINE_SPACING_TWIPS)
     normal.paragraph_format.widow_control = False
 
-    # Unified filing header: full software name + version on the left, the
-    # page number on the right, nothing in the footer. The template's Header
-    # style ships a centre tab stop that OOXML would merge with ours and
-    # capture the tab character, so it must be stripped first.
-    header_style_ppr = doc.styles["Header"].element.pPr
-    if header_style_ppr is not None:
-        style_tabs = header_style_ppr.find(qn("w:tabs"))
-        if style_tabs is not None:
-            header_style_ppr.remove(style_tabs)
     header = section.header.paragraphs[0]
-    header.paragraph_format.tab_stops.add_tab_stop(
-        Mm(PAGE_WIDTH_MM - MARGIN_LEFT_MM - MARGIN_RIGHT_MM), WD_TAB_ALIGNMENT.RIGHT)
-    header.add_run(f"{facts.get('software_full_name', '软件源程序')}{facts.get('version', '')}")
-    header.add_run("\t第 ")
-    add_page_field(header)
-    header.add_run(" 页")
-    for run in header.runs:
-        run.font.name = "Times New Roman"
-        run._element.rPr.rFonts.set(qn("w:eastAsia"), EAST_ASIA_FONT)
-        run.font.size = Pt(9)
+    header.text = ""
+    footer = section.footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer.paragraph_format.space_before = Pt(0)
+    footer.paragraph_format.space_after = Pt(0)
+    dash_before = footer.add_run("- ")
+    set_run_font(dash_before)
+    add_page_field(footer)
+    for run in footer.runs:
+        set_run_font(run)
+    dash_after = footer.add_run(" -")
+    set_run_font(dash_after)
 
-    # pageBreakBefore keeps every physical page at exactly lines_per_page
-    # paragraphs; an explicit break paragraph would consume one line slot.
     for page_index, lines in enumerate(pages):
         for line_index, line in enumerate(lines):
             paragraph = doc.add_paragraph()
             if page_index and not line_index:
                 paragraph.paragraph_format.page_break_before = True
-            paragraph.add_run(line if line else " ")
+            if line:
+                set_run_font(paragraph.add_run(line))
     doc.save(path)
+
+
+def load_source_files(root: Path, files: list[Path], sides: dict[str, str]) -> tuple[list[dict], list[dict], int]:
+    """Return placeable files, oversized files, and retained blank-line count."""
+    placeable: list[dict] = []
+    oversized: list[dict] = []
+    blank_lines = 0
+    for path in files:
+        text = safe_text(path, max_bytes=20_000_000)
+        if text is None:
+            continue
+        rel = relative_posix(path, root)
+        original_lines = text.splitlines()
+        visual: list[str] = []
+        mapping: list[dict] = []
+        digest = sha256_file(path)
+        for original_no, original in enumerate(original_lines, 1):
+            if not original.strip():
+                blank_lines += 1
+            segments = wrap_source_line(original)
+            for segment_no, segment in enumerate(segments, 1):
+                visual.append(segment)
+                mapping.append({
+                    "file": rel,
+                    "file_sha256": digest,
+                    "source_line": original_no,
+                    "segment": segment_no,
+                    "source_text": original.expandtabs(4),
+                })
+        if not visual:
+            continue
+        record = {
+            "path": rel,
+            "sha256": digest,
+            "side": sides.get(rel, ""),
+            "original_lines": len(original_lines),
+            "visual_rows": len(visual),
+            "visual": visual,
+            "mapping": mapping,
+        }
+        if len(visual) > MAX_VOLUME_ROWS:
+            oversized.append({
+                "path": rel,
+                "sha256": digest,
+                "original_lines": len(original_lines),
+                "visual_rows": len(visual),
+                "page_count": page_count_for_rows(len(visual)),
+            })
+            continue
+        placeable.append(record)
+    return placeable, oversized, blank_lines
+
+
+def assign_output_lines(files: list[dict]) -> tuple[list[str], list[dict]]:
+    lines: list[str] = []
+    mapping: list[dict] = []
+    for record in files:
+        record["output_start_line"] = len(lines) + 1
+        for segment, meta in zip(record["visual"], record["mapping"]):
+            lines.append(segment)
+            published = dict(meta)
+            published["output_line"] = len(lines)
+            mapping.append(published)
+        record["output_end_line"] = len(lines)
+    return lines, mapping
+
+
+def volume_payload(files: list[dict], page_number_start: int) -> dict:
+    rows: list[str] = []
+    for record in files:
+        rows.extend(record["visual"])
+    pages = paginate_rows(rows)
+    return {
+        "files": [record["path"] for record in files],
+        "pages": pages,
+        "page_count": len(pages),
+        "page_number_start": page_number_start,
+        "visual_rows": len(rows),
+        "first_output_line": files[0]["output_start_line"] if files else None,
+        "last_output_line": files[-1]["output_end_line"] if files else None,
+        "logical_source_pages": list(range(1, len(pages) + 1)),
+    }
+
+
+def block_reason(placeable: list[dict], oversized: list[dict]) -> str:
+    full_pages = page_count_for_rows(sum(int(item["visual_rows"]) for item in placeable))
+    reason = (
+        f"无法在不拆开源文件的前提下形成前后两卷：可排版文件 {len(placeable)} 个，"
+        f"连续铺排约 {full_pages} 页。需要前后卷各 {VOLUME_PAGE_MIN}–{VOLUME_PAGE_MAX} 页、"
+        f"合计 {TOTAL_PAGE_MIN}–{TOTAL_PAGE_MAX} 页，且中间至少隔开一个源文件。"
+    )
+    if oversized:
+        listed = "、".join(item["path"] for item in oversized[:8])
+        reason += f" 另有 {len(oversized)} 个文件超过 {VOLUME_PAGE_MAX} 页，已整文件跳过：{listed}。"
+    return reason
 
 
 def main() -> int:
@@ -308,85 +475,41 @@ def main() -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--facts", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--lines-per-page", type=int, default=50,
-                        help="Effective (logical) source lines per page")
-    parser.add_argument("--max-chars", type=int, default=87)
-    parser.add_argument("--font-size", type=float, default=9.0)
-    parser.add_argument("--line-spacing", type=float, default=None,
-                        help="Exact leading in pt; defaults to page body height / rendered rows")
     args = parser.parse_args()
-    if args.lines_per_page < 50:
-        parser.error("--lines-per-page must be at least 50")
     root = args.project.resolve()
     manifest = load_json(args.manifest)
-    facts = load_json(args.facts) if args.facts else {}
+    sides = {str(item.get("path")): str(item.get("side") or "") for item in manifest.get("file_decisions", [])}
     files = select_files(root, manifest)
     if not files:
         parser.error("No eligible source files selected by the manifest")
-    max_columns = max_columns_for(args.font_size, args.max_chars)
-    lines, mapping, file_records, blank_lines = collect_lines(root, files, max_columns)
-    if not lines:
-        parser.error("Selected files contain no readable source lines")
-    full_pages, rows_per_page = paginate(lines, mapping, args.lines_per_page)
-    total_pages = len(full_pages)
-    grid_spacing = exact_line_spacing_pt(rows_per_page)
-    line_spacing = min(args.line_spacing, grid_spacing) if args.line_spacing else grid_spacing
-    if total_pages < 60:
-        groups = {"all": list(range(total_pages))}
-        selection = "all_under_60_pages"
-    else:
-        groups = {"front_30": list(range(30)), "back_30": list(range(total_pages - 30, total_pages))}
-        selection = "first_30_and_last_30_separate_volumes"
-    # Pages hold a variable number of rendered rows, so line offsets must be
-    # accumulated rather than derived from a fixed page size.
-    page_offsets: list[int] = []
-    running = 0
-    for page in full_pages:
-        page_offsets.append(running)
-        running += len(page)
+    placeable, oversized, blank_lines = load_source_files(root, files, sides)
+    lines, mapping = assign_output_lines(placeable)
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    full_pages = paginate_rows(lines)
     full_txt = output / "source-full.txt"
-    full_docx = output / "source-full.docx"
     write_txt(full_txt, full_pages)
-    write_docx(full_docx, full_pages, facts, rows_per_page, args.font_size, line_spacing)
-    artifacts = {
-        "full_txt": {"path": str(full_txt), "sha256": sha256_file(full_txt)},
-        "full_docx": {"path": str(full_docx), "sha256": sha256_file(full_docx)},
+    choice = choose_filing_volumes(placeable)
+    file_records = [{
+        "path": item["path"], "sha256": item["sha256"], "side": item.get("side", ""),
+        "original_lines": item["original_lines"], "visual_rows": item["visual_rows"],
+        "output_start_line": item["output_start_line"], "output_end_line": item["output_end_line"],
+    } for item in placeable]
+    layout = {
+        "font_ascii": ASCII_FONT, "font_east_asia": EAST_ASIA_FONT,
+        "font_size_pt": FONT_SIZE_PT, "line_spacing_pt": LINE_SPACING_PT,
+        "rows_per_page": ROWS_PER_PAGE,
+        "margins_mm": {"top": MARGIN_TOP_MM, "bottom": MARGIN_BOTTOM_MM,
+                       "left": MARGIN_LEFT_MM, "right": MARGIN_RIGHT_MM},
+        "pagination": "page_break_before",
+        "line_policy": "original lines retained, including blanks; long lines wrap on measured Calibri/SimSun advances without dropping characters",
+        "advance": "measured" if ascii_metrics_loaded() else "fallback_11pt",
+        "header": "none",
+        "footer": "centered page number, - n -",
+        "page_numbering": "front starts at 1, back continues",
     }
-    filing_total = sum(len(indices) for indices in groups.values())
-    filing_groups = {}
-    for key, indices in groups.items():
-        pages = [full_pages[index] for index in indices]
-        source_numbers = [index + 1 for index in indices]
-        txt_path = output / f"source-{key.replace('_', '-')}.txt"
-        docx_path = output / f"source-{key.replace('_', '-')}.docx"
-        write_txt(txt_path, pages)
-        # Filing volumes carry one continuous page sequence: front 1-30 and
-        # back 31-60 when split, otherwise 1-N for the single volume.
-        write_docx(docx_path, pages, facts, rows_per_page, args.font_size, line_spacing,
-                   page_number_start=31 if key == "back_30" else 1, filing_total=filing_total)
-        artifacts[f"{key}_txt"] = {"path": str(txt_path), "sha256": sha256_file(txt_path)}
-        artifacts[f"{key}_docx"] = {"path": str(docx_path), "sha256": sha256_file(docx_path)}
-        filing_groups[key] = {
-            "logical_source_pages": source_numbers,
-            "page_count": len(pages),
-            "first_output_line": page_offsets[indices[0]] + 1 if indices else None,
-            "last_output_line": page_offsets[indices[-1]] + len(pages[-1]) if indices else None,
-        }
-
-    line_pages = []
-    for page_no, page_lines in enumerate(full_pages, 1):
-        offset = page_offsets[page_no - 1]
-        line_pages.append({
-            "page": page_no,
-            "start_output_line": offset + 1,
-            "end_output_line": offset + len(page_lines),
-            "line_count": len(page_lines),
-            "effective_lines": logical_line_count(page_lines, mapping, offset),
-        })
-    provenance = {
-        "schema_version": "1.0",
+    base = {
+        "schema_version": "1.1",
         "generated_at": now_iso(),
         "project_root": str(root),
         "manifest": str(args.manifest.resolve()),
@@ -394,34 +517,85 @@ def main() -> int:
         "ordered_files_confirmed": bool(manifest.get("ordered_files")),
         "selection_policy": manifest.get("selection_policy", {}),
         "file_decisions": manifest.get("file_decisions", []),
-        "lines_per_page": args.lines_per_page,
-        "rows_per_page": rows_per_page,
-        "max_chars": max_columns,
-        "requested_max_chars": args.max_chars,
-        "original_line_count": sum(item.get("original_lines", 0) for item in file_records),
-        "blank_lines_excluded": blank_lines,
+        "lines_per_page": ROWS_PER_PAGE,
+        "rows_per_page": ROWS_PER_PAGE,
+        "blank_lines_excluded": 0,
+        "blank_lines_retained": blank_lines,
+        "original_line_count": sum(item["original_lines"] for item in file_records)
+        + sum(item["original_lines"] for item in oversized),
         "full_line_count": len(lines),
-        "full_page_count": total_pages,
-        "filing_page_count": sum(item["page_count"] for item in filing_groups.values()),
-        "selection": selection,
-        "filing_groups": filing_groups,
+        "full_page_count": len(full_pages),
         "files": file_records,
-        "pages": line_pages,
-        "line_mapping": mapping,
-        "layout": {"font_ascii": ASCII_FONT, "font_east_asia": EAST_ASIA_FONT,
-                   "font_size_pt": args.font_size, "line_spacing_pt": line_spacing,
-                   "max_display_columns": max_columns, "cjk_columns": 2,
-                   "pagination": "page_break_before",
-                   "line_policy": "blank lines excluded; pages cut on effective source lines",
-                   "rows_per_page": rows_per_page,
-                   "header": "software name + version left, page number right, empty footer",
-                   "page_numbering": "front 1-30 and back 31-60 when split, otherwise 1-N"},
-        "artifacts": artifacts,
+        "line_mapping": [{key: value for key, value in item.items() if key != "source_text"} for item in mapping],
+        "skipped_oversized_files": oversized,
+        "layout": layout,
+        "artifacts": {"full_txt": {"path": str(full_txt), "sha256": sha256_file(full_txt)}},
     }
     provenance_path = output / "source-provenance.json"
-    save_json(provenance_path, provenance)
+    if choice is None:
+        reason = block_reason(placeable, oversized)
+        base.update({
+            "selection": "blocked",
+            "block_reason": reason,
+            "filing_page_count": 0,
+            "filing_groups": {},
+            "gap_files": [],
+            "pages": [],
+        })
+        save_json(provenance_path, base)
+        print(f"SOURCE_OUTPUT={output}")
+        print(f"BLOCK_REASON={reason}")
+        print(f"PROVENANCE={provenance_path}")
+        return 3
+
+    front_end, back_start = choice
+    front_files = placeable[:front_end]
+    back_files = placeable[back_start:]
+    gap_files = [item["path"] for item in placeable[front_end:back_start]]
+    front = volume_payload(front_files, 1)
+    back = volume_payload(back_files, front["page_count"] + 1)
+    artifacts = dict(base["artifacts"])
+    filing_groups = {}
+    page_meta: list[dict] = []
+    for key, payload in (("front", front), ("back", back)):
+        txt_path = output / f"source-{key}.txt"
+        docx_path = output / f"source-{key}.docx"
+        write_txt(txt_path, payload["pages"])
+        write_docx(docx_path, payload["pages"], payload["page_number_start"])
+        artifacts[f"{key}_txt"] = {"path": str(txt_path), "sha256": sha256_file(txt_path)}
+        artifacts[f"{key}_docx"] = {"path": str(docx_path), "sha256": sha256_file(docx_path)}
+        filing_groups[key] = {
+            "files": payload["files"],
+            "page_count": payload["page_count"],
+            "page_number_start": payload["page_number_start"],
+            "visual_rows": payload["visual_rows"],
+            "logical_source_pages": payload["logical_source_pages"],
+            "first_output_line": payload["first_output_line"],
+            "last_output_line": payload["last_output_line"],
+        }
+        for page_no, page_lines in enumerate(payload["pages"], 1):
+            page_meta.append({
+                "volume": key,
+                "page": page_no,
+                "line_count": len(page_lines),
+                "effective_lines": sum(1 for line in page_lines if line.strip()),
+            })
+    base.update({
+        "selection": "file_aligned_front_back",
+        "block_reason": "",
+        "filing_page_count": front["page_count"] + back["page_count"],
+        "filing_groups": filing_groups,
+        "gap_files": gap_files,
+        "pages": page_meta,
+        "artifacts": artifacts,
+    })
+    save_json(provenance_path, base)
     print(f"SOURCE_OUTPUT={output}")
-    print(f"FILES={len(file_records)} LINES={len(lines)} FULL_PAGES={total_pages} FILING_PAGES={sum(item['page_count'] for item in filing_groups.values())} SELECTION={selection}")
+    print(
+        f"FILES={len(file_records)} LINES={len(lines)} FULL_PAGES={len(full_pages)} "
+        f"FRONT_PAGES={front['page_count']} BACK_PAGES={back['page_count']} "
+        f"FILING_PAGES={front['page_count'] + back['page_count']} SELECTION=file_aligned_front_back"
+    )
     print(f"PROVENANCE={provenance_path}")
     return 0
 

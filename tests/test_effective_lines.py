@@ -5,20 +5,36 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
 
-class EffectiveLineTests(unittest.TestCase):
-    def test_blank_lines_never_enter_the_filing_corpus(self):
+def write_manifest(project: Path, ordered: list[str]) -> Path:
+    manifest = project / "manifest.json"
+    manifest.write_text(json.dumps({
+        "include": ["**/*.py"], "exclude": [], "ordered_files": ordered,
+        "review": {"confirmed_by": "unit", "confirmed_at": "2026-08-12T00:00:00+08:00",
+                   "open_source_boundary_checked": True, "generated_code_boundary_checked": True,
+                   "secret_scan_checked": True}}, ensure_ascii=False), encoding="utf-8")
+    return manifest
+
+
+def compose(project: Path, manifest: Path, output: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([
+        sys.executable, str(SCRIPTS / "compose_code.py"), "--project", str(project),
+        "--manifest", str(manifest), "--output-dir", str(output),
+    ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+
+
+class SourceLineTests(unittest.TestCase):
+    def test_short_corpus_blocks_instead_of_padding(self):
         with tempfile.TemporaryDirectory(prefix="softcert-effective-") as temp:
             root = Path(temp)
             project, output = root / "project", root / "output"
             project.mkdir()
-            # 3 blank lines for every 2 code lines: a page built naively from
-            # this file would carry ~40% blanks and fail the reviewer count.
             blocks = []
             for index in range(1, 131):
                 blocks.append(f"def handler_{index}(payload):")
@@ -27,80 +43,68 @@ class EffectiveLineTests(unittest.TestCase):
                 blocks.append("   ")
                 blocks.append("")
             (project / "engine.py").write_text("\n".join(blocks) + "\n", encoding="utf-8")
-            manifest = project / "manifest.json"
-            manifest.write_text(json.dumps({
-                "include": ["**/*.py"], "exclude": [], "ordered_files": ["engine.py"],
-                "review": {"confirmed_by": "unit", "confirmed_at": "2026-08-12T00:00:00+08:00",
-                           "open_source_boundary_checked": True, "generated_code_boundary_checked": True,
-                           "secret_scan_checked": True}}, ensure_ascii=False), encoding="utf-8")
-            compose = subprocess.run([
-                sys.executable, str(SCRIPTS / "compose_code.py"), "--project", str(project),
-                "--manifest", str(manifest), "--output-dir", str(output),
-            ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-            self.assertEqual(compose.returncode, 0, compose.stdout + compose.stderr)
-
+            compose_result = compose(project, write_manifest(project, ["engine.py"]), output)
+            self.assertEqual(compose_result.returncode, 3, compose_result.stdout + compose_result.stderr)
+            self.assertFalse((output / "source-front.docx").exists())
             provenance = json.loads((output / "source-provenance.json").read_text(encoding="utf-8"))
-            self.assertEqual(provenance["blank_lines_excluded"], 390)
-            self.assertEqual(provenance["full_line_count"], 260)
-            self.assertEqual(provenance["original_line_count"], 650)
+            self.assertEqual(provenance["selection"], "blocked")
+            self.assertEqual(provenance["blank_lines_excluded"], 0)
+            self.assertGreater(provenance["blank_lines_retained"], 0)
+            raw = (output / "source-full.txt").read_text(encoding="utf-8")
+            self.assertIn("\n\n", raw.replace("\n\f\n", "\n"))
 
-            # Pages are separated by "\n\f\n"; split on that explicitly since
-            # str.splitlines() also treats the form feed as a line boundary.
-            raw = (output / "source-full.txt").read_text(encoding="utf-8").rstrip("\n")
-            lines = [line for chunk in raw.split("\n\f\n") for line in chunk.split("\n")]
-            self.assertEqual(len(lines), 260)
-            self.assertTrue(all(line.strip() for line in lines), "corpus must contain no blank lines")
-
-            pages = provenance["pages"]
-            self.assertTrue(all(page["effective_lines"] == 50 for page in pages[:-1]),
-                            "every page except the last must carry the full quota")
-
-            # Traceability survives the removal: material lines still map to
-            # their original (non-consecutive) source line numbers.
-            mapping = provenance["line_mapping"]
-            self.assertEqual(mapping[0]["source_line"], 1)
-            self.assertEqual(mapping[1]["source_line"], 2)
-            self.assertEqual(mapping[2]["source_line"], 6)
-
-    def test_wrapped_long_lines_still_count_as_one_effective_line(self):
-        """A reviewer counts source lines, not rendered rows."""
+    def test_wrapped_lines_keep_every_character_and_volumes_do_not_share_files(self):
         with tempfile.TemporaryDirectory(prefix="softcert-wrap-") as temp:
             root = Path(temp)
             project, output = root / "project", root / "output"
             project.mkdir()
-            lines = []
-            for index in range(1, 221):
-                if index % 3 == 0:
-                    payload = ", ".join(f"'field_{n}': value_{n}" for n in range(12))
-                    lines.append(f"CONFIG_{index} = {{{payload}}}")
-                else:
-                    lines.append(f"result_{index} = compute({index})")
-            (project / "engine.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
-            manifest = project / "manifest.json"
-            manifest.write_text(json.dumps({
-                "include": ["**/*.py"], "exclude": [], "ordered_files": ["engine.py"],
-                "review": {"confirmed_by": "unit", "confirmed_at": "2026-08-12T00:00:00+08:00",
-                           "open_source_boundary_checked": True, "generated_code_boundary_checked": True,
-                           "secret_scan_checked": True}}, ensure_ascii=False), encoding="utf-8")
-            compose = subprocess.run([
-                sys.executable, str(SCRIPTS / "compose_code.py"), "--project", str(project),
-                "--manifest", str(manifest), "--output-dir", str(output),
-            ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-            self.assertEqual(compose.returncode, 0, compose.stdout + compose.stderr)
+            ordered = []
+            marker = "TOKEN_" + ("A" * 180) + "_END"
+            for index in range(80):
+                relative = f"src/service_{index:03d}.py"
+                path = project / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                lines = [f"value_{index}_{line} = process_item({line})" for line in range(80)]
+                if index == 0:
+                    lines[0] = marker
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                ordered.append(relative)
+            compose_result = compose(project, write_manifest(project, ordered), output)
+            self.assertEqual(compose_result.returncode, 0, compose_result.stdout + compose_result.stderr)
             provenance = json.loads((output / "source-provenance.json").read_text(encoding="utf-8"))
-            pages = provenance["pages"]
+            front = provenance["filing_groups"]["front"]
+            back = provenance["filing_groups"]["back"]
+            self.assertTrue(55 <= front["page_count"] <= 65)
+            self.assertTrue(55 <= back["page_count"] <= 65)
+            self.assertTrue(120 <= front["page_count"] + back["page_count"] <= 125)
+            self.assertTrue(set(front["files"]).isdisjoint(set(back["files"])))
+            self.assertNotIn(front["files"][-1], back["files"])
+            self.assertTrue(provenance["gap_files"])
+            self.assertEqual(back["page_number_start"], front["page_count"] + 1)
+            flat = (output / "source-full.txt").read_text(encoding="utf-8").replace("\n", "").replace("\f", "")
+            self.assertIn(marker, flat)
+            with zipfile.ZipFile(output / "source-front.docx") as archive:
+                document = archive.read("word/document.xml").decode("utf-8")
+                header = archive.read("word/header1.xml").decode("utf-8")
+                footer = archive.read("word/footer1.xml").decode("utf-8")
+            self.assertNotIn("PAGE", header)
+            self.assertNotIn("<w:t", header.replace("<w:tabs", ""))
+            self.assertIn("PAGE", footer)
+            self.assertIn("Calibri", document)
+            self.assertIn('w:val="21"', document)
+            self.assertIn("pageBreakBefore", document)
 
-            wrapped_rows = sum(1 for item in provenance["line_mapping"] if item["segment"] > 1)
-            self.assertGreater(wrapped_rows, 0, "fixture must actually produce wrapped rows")
-            self.assertTrue(all(page["effective_lines"] == 50 for page in pages[:-1]),
-                            "wrapped rows must not steal quota from effective lines")
-            self.assertTrue(any(page["line_count"] > page["effective_lines"] for page in pages),
-                            "at least one page should render more rows than source lines")
-            self.assertGreaterEqual(provenance["rows_per_page"], 50)
-            # A wrapped line must never straddle a page boundary.
-            for page in pages:
-                start = page["start_output_line"] - 1
-                self.assertEqual(provenance["line_mapping"][start]["segment"], 1)
+    def test_installed_calibri_keeps_a_normal_use_line_together(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import compose_code
+        if not compose_code.ascii_metrics_loaded():
+            self.skipTest("Calibri metrics unavailable")
+        line = "use crate::error::{AppError, AppResult};"
+        self.assertEqual(compose_code.wrap_source_line(line), [line])
+        wide = "@" * 80
+        parts = compose_code.wrap_source_line(wide)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual("".join(parts), wide)
 
 
 if __name__ == "__main__":

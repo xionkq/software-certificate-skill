@@ -15,7 +15,7 @@ from common import (load_json, looks_like_backend, now_iso, relative_posix, safe
 EXTENSIONS = {".py", ".cs", ".java", ".kt", ".js", ".jsx", ".ts", ".tsx", ".vue", ".go",
               ".rs", ".c", ".h", ".cpp", ".cc", ".php", ".rb", ".swift", ".m", ".mm",
               ".dart", ".sql", ".cshtml", ".razor", ".html"}
-EXCLUDED_PARTS = {".git", "node_modules", "vendor", "dist", "build", "bin", "obj", "target",
+EXCLUDED_PARTS = {".git", ".cursor", "node_modules", "vendor", "dist", "build", "bin", "obj", "target",
                   "coverage", "__pycache__", ".next", ".nuxt", "generated", "fixtures", "fixture",
                   "demo", "demos", "example", "examples", "samples", "软件著作权申请资料"}
 EXCLUDED_FILES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "composer.lock"}
@@ -366,7 +366,7 @@ def main() -> int:
     manifest = {
         "include": ["**/*"],
         "exclude": [
-            "**/node_modules/**", "**/vendor/**", "**/dist/**", "**/build/**", "**/bin/**",
+            "**/.cursor/**", "**/node_modules/**", "**/vendor/**", "**/dist/**", "**/build/**", "**/bin/**",
             "**/obj/**", "**/target/**", "**/coverage/**", "**/*.min.js", "**/*.generated.*",
             "**/*test*/**", "**/*fixture*/**", "**/*demo*/**", "**/*example*/**"
         ],

@@ -342,14 +342,25 @@ def screenshot_index(paths: ProductPaths, facts: dict[str, Any], business_path: 
 
 
 def provenance_density(provenance: dict[str, Any]) -> tuple[bool, str]:
-    """Check effective source lines before spending time rendering documents."""
-    pages = provenance.get("pages", [])
-    quota = int(provenance.get("lines_per_page", 50))
-    effective = [int(item.get("effective_lines", item.get("line_count", 0))) for item in pages]
-    short = [index + 1 for index, value in enumerate(effective[:-1]) if value < quota]
-    if short:
-        return False, f"非末页有效源码行不足{quota}行：{short[:12]}"
-    return bool(effective), f"非末页均达到{quota}行；末页{effective[-1] if effective else 0}行（末页例外）"
+    """Check the file-aligned front/back page window before rendering."""
+    if provenance.get("selection") == "blocked":
+        return False, str(provenance.get("block_reason") or "源码无法按完整文件形成前后卷")
+    groups = provenance.get("filing_groups", {})
+    front, back = groups.get("front"), groups.get("back")
+    if not isinstance(front, dict) or not isinstance(back, dict):
+        return False, "缺少前后两卷"
+    front_pages, back_pages = int(front.get("page_count", 0)), int(back.get("page_count", 0))
+    if not (55 <= front_pages <= 65 and 55 <= back_pages <= 65 and 120 <= front_pages + back_pages <= 125):
+        return False, f"页数不在窗口内：前{front_pages}页、后{back_pages}页、合计{front_pages + back_pages}页"
+    front_files, back_files = set(front.get("files") or []), set(back.get("files") or [])
+    if not front_files or not back_files:
+        return False, "前后卷没有源文件"
+    overlap = front_files & back_files
+    if overlap:
+        return False, "前后卷含有相同源文件：" + "、".join(sorted(overlap)[:8])
+    if not provenance.get("gap_files"):
+        return False, "前后卷代码连续，中间没有隔开的源文件"
+    return True, f"前{front_pages}页、后{back_pages}页，合计{front_pages + back_pages}页，中间隔开{len(provenance.get('gap_files') or [])}个源文件"
 
 
 def markdown_report(report: dict[str, Any]) -> str:
@@ -389,7 +400,8 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
     progress("正在选择真实源码")
     manifest, selection_report = paths.work / "source-manifest.json", paths.work / "source-selection-report.json"
     source_args = ["--project", str(paths.project), "--manifest", str(manifest),
-                   "--report", str(selection_report), "--analysis", str(analysis)]
+                   "--report", str(selection_report), "--analysis", str(analysis),
+                   "--target-lines", "16000", "--max-files", "400"]
     for marker in facts.get("source_forbidden_markers", []):
         if str(marker).strip():
             source_args += ["--forbidden-marker", str(marker)]
@@ -434,69 +446,56 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
     progress("正在生成代码材料")
     code_dir = paths.work / "code-material"
     code_dir.mkdir(parents=True, exist_ok=True)
-    # Width/font shrink per retry while the exact leading keeps 50 lines
-    # filling the A4 page body (~707.5pt), so no volume ships with a large
-    # blank band at the bottom of every page.
-    # Wider columns mean fewer wrapped rows, which keeps 50 effective source
-    # lines inside one page grid. Retries narrow the text and shrink the font.
-    configurations = [(87, 9.0, None), (83, 8.5, None), (78, 8.0, None)]
     provenance = code_dir / "source-provenance.json"
     render_dir = paths.work / "render-reports"
     render_dir.mkdir(parents=True, exist_ok=True)
     software = safe_filename(facts["software_full_name"])
-    # Code volume PDFs are drawn directly on a fixed line grid (pagination is
-    # correct by construction and takes milliseconds). Office conversion stays
-    # as the fallback when reportlab or a TrueType CJK font is unavailable.
+    # Code volume PDFs are drawn directly on the composed line grid. Office
+    # conversion stays as the fallback when reportlab or Calibri/CJK fonts
+    # are unavailable. Font size stays at 五号; page count is not recovered
+    # by shrinking type.
     code_pdf_engine = os.environ.get("SOFTCERT_CODE_PDF_ENGINE", "direct")
-    formal_specs: list[tuple[Path, str, int, str]] = []
+    composed = run_script("compose_code.py", [
+        "--project", str(paths.project), "--manifest", str(manifest),
+        "--facts", str(paths.work / "application-facts.json"),
+        "--output-dir", str(code_dir),
+    ], {0, 3})
+    prov = load_json(provenance)
+    if composed.returncode == 3:
+        pending = paths.quality / "待确认事项清单.md"
+        pending.write_text("# 待确认事项清单\n\n- " + str(prov.get("block_reason") or "源码无法按完整文件形成前后卷") + "\n",
+                           encoding="utf-8")
+        record_stage(paths, state, "code_material", "blocked", hash_inputs([manifest, provenance]), [provenance, pending],
+                     str(prov.get("block_reason") or ""))
+        record_stage(paths, state, "release", "blocked_by_source_volume", hash_inputs([provenance]), [pending],
+                     "源码页数或文件边界不满足交存要求，未生成正式代码材料")
+        progress("源码不足以按完整文件形成前后卷，当前流程已暂停")
+        print(f"SOURCE_BLOCKED={pending}")
+        return 2
+    density_ok, density_detail = provenance_density(prov)
+    if not density_ok:
+        raise RuntimeError(f"代码分页检查失败：{density_detail}")
+    formal_specs = [
+        (code_dir / "source-front.docx", "源代码（前30页）", int(prov["filing_groups"]["front"]["page_count"]), "front"),
+        (code_dir / "source-back.docx", "源代码（后30页）", int(prov["filing_groups"]["back"]["page_count"]), "back"),
+    ]
     converted: list[tuple[Path, Path, Path]] = []
-    last_error = None
-    for width, font, spacing in configurations:
-        compose_args = ["--project", str(paths.project), "--manifest", str(manifest),
-                        "--facts", str(paths.work / "application-facts.json"),
-                        "--output-dir", str(code_dir),
-                        "--max-chars", str(width), "--font-size", str(font)]
-        if spacing is not None:
-            compose_args += ["--line-spacing", str(spacing)]
-        run_script("compose_code.py", compose_args)
-        prov = load_json(provenance)
-        density_ok, density_detail = provenance_density(prov)
-        if not density_ok:
-            last_error = RuntimeError(f"代码分页密度检查失败：{density_detail}")
-            progress("代码页有效行不足，正在尝试下一种排版配置")
-            continue
-        formal_specs = []
-        if "all" in prov["filing_groups"]:
-            formal_specs.append((code_dir / "source-all.docx", f"{software}-代码(全部)",
-                                 prov["filing_groups"]["all"]["page_count"], "all"))
-        else:
-            formal_specs += [(code_dir / "source-front-30.docx", f"{software}-代码(前30页)", 30, "front_30"),
-                             (code_dir / "source-back-30.docx", f"{software}-代码(后30页)", 30, "back_30")]
-        converted = []
-        try:
-            for docx, name, expected_pages, volume in formal_specs:
-                pdf, report = code_dir / f"{name}.pdf", render_dir / f"{name}.json"
-                if code_pdf_engine == "direct":
-                    try:
-                        run_script("render_code_pdf.py", ["--provenance", str(provenance),
-                                   "--facts", str(paths.work / "application-facts.json"),
-                                   "--volume", volume, "--pdf", str(pdf), "--report", str(report),
-                                   "--render-dir", str(paths.work / "rendered" / name),
-                                   "--expected-pages", str(expected_pages)], timeout_seconds=120)
-                    except RuntimeError:
-                        code_pdf_engine = "legacy"
-                if code_pdf_engine == "legacy":
-                    run_script("convert_document.py", ["--input", str(docx), "--pdf", str(pdf), "--report", str(report),
-                               "--render-dir", str(paths.work / "rendered" / name), "--expected-pages", str(expected_pages)],
-                               timeout_seconds=420)
-                converted.append((docx, pdf, report))
-            last_error = None
-            break
-        except RuntimeError as exc:
-            last_error = exc
-            progress("正在自动修复问题")
-    if last_error:
-        raise last_error
+    for docx, name, expected_pages, volume in formal_specs:
+        pdf, report = code_dir / f"{name}.pdf", render_dir / f"{name}.json"
+        if code_pdf_engine == "direct":
+            try:
+                run_script("render_code_pdf.py", ["--provenance", str(provenance),
+                           "--facts", str(paths.work / "application-facts.json"),
+                           "--volume", volume, "--pdf", str(pdf), "--report", str(report),
+                           "--render-dir", str(paths.work / "rendered" / name),
+                           "--expected-pages", str(expected_pages)], timeout_seconds=120)
+            except RuntimeError:
+                code_pdf_engine = "legacy"
+        if code_pdf_engine == "legacy":
+            run_script("convert_document.py", ["--input", str(docx), "--pdf", str(pdf), "--report", str(report),
+                       "--render-dir", str(paths.work / "rendered" / name), "--expected-pages", str(expected_pages)],
+                       timeout_seconds=420)
+        converted.append((docx, pdf, report))
     record_stage(paths, state, "code_material", "complete", hash_inputs([manifest, provenance]), [provenance] + [item for group in converted for item in group[:2]])
 
     progress("正在整理申请表")
@@ -554,6 +553,12 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
             f"架构范围未能明确判定，但仓库同时存在前端与后端实质源码，材料已按行数占比混排"
             f"（后端 {sides.get('backend_files', 0)} 个文件 / {sides.get('backend_lines', 0)} 行）。"
             "请确认前后端代码均归属于本申请软件。")
+    oversized = load_json(provenance).get("skipped_oversized_files") or []
+    if oversized:
+        listed = "、".join(item["path"] for item in oversized[:8])
+        pending_items.append(
+            f"以下 {len(oversized)} 个源文件单文件超过 65 页，未拆开、未写入交存卷："
+            f"{listed}{'等' if len(oversized) > 8 else ''}。")
     ownership = selection_data.get("ownership_review", [])
     if ownership:
         listed = "、".join(item["path"] for item in ownership[:8])
@@ -575,7 +580,7 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
 
 只有一致性校验报告中的 `release_ready=true` 时，文件才会复制到“正式资料”；否则仅保留为草稿。
 """, encoding="utf-8")
-    code_upload = "全部代码PDF" if "all" in load_json(provenance)["filing_groups"] else "代码前30页PDF与后30页PDF"
+    code_upload = "源代码（前30页）.pdf 与 源代码（后30页）.pdf"
     (paths.quality / "提交材料清单.md").write_text(f"""# 提交材料清单
 
 当前状态：{'等待截图完成，仅供草稿复核' if placeholders else '等待最终一致性校验'}。

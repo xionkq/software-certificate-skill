@@ -18,8 +18,9 @@ import time
 from pathlib import Path
 
 from common import load_json, now_iso, save_json, sha256_file
-from compose_code import (MARGIN_LEFT_MM, MARGIN_RIGHT_MM, MARGIN_TOP_MM, MM_TO_PT,
-                          PAGE_HEIGHT_MM, PAGE_WIDTH_MM, char_columns)
+from compose_code import (ASCII_CANDIDATES, ASCII_FONT, CJK_CANDIDATES, FONT_SIZE_PT,
+                          LINE_SPACING_PT, MARGIN_BOTTOM_MM, MARGIN_LEFT_MM, MARGIN_RIGHT_MM,
+                          MARGIN_TOP_MM, MM_TO_PT, PAGE_HEIGHT_MM, PAGE_WIDTH_MM, char_columns)
 
 try:
     from reportlab.lib.colors import black
@@ -36,30 +37,8 @@ PAGE_HEIGHT_PT = PAGE_HEIGHT_MM * MM_TO_PT
 MARGIN_TOP_PT = MARGIN_TOP_MM * MM_TO_PT
 MARGIN_LEFT_PT = MARGIN_LEFT_MM * MM_TO_PT
 MARGIN_RIGHT_PT = MARGIN_RIGHT_MM * MM_TO_PT
-HEADER_BASELINE_FROM_TOP_PT = 15 * MM_TO_PT + 7.2
-HEADER_SIZE = 9.0
-
-WINDOWS_FONTS = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
-# (font path, TTC subfont index). CFF-flavoured collections such as Ubuntu's
-# NotoSansCJK cannot be parsed by reportlab's TTFont, so they are not listed.
-CJK_CANDIDATES = [
-    (WINDOWS_FONTS / "simsun.ttc", 0),
-    (WINDOWS_FONTS / "simhei.ttf", None),
-    (WINDOWS_FONTS / "simfang.ttf", None),
-    (Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"), 0),
-    (Path("/usr/share/fonts/truetype/arphic/uming.ttc"), 0),
-    (Path("/System/Library/Fonts/STHeiti Light.ttc"), 0),
-]
-ASCII_CANDIDATES = [
-    (WINDOWS_FONTS / "consola.ttf", None),
-    (WINDOWS_FONTS / "CascadiaMono.ttf", None),
-    (Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"), None),
-    (Path("/System/Library/Fonts/Menlo.ttc"), 0),
-]
-LATIN_TEXT_CANDIDATES = [
-    (WINDOWS_FONTS / "times.ttf", None),
-    (Path("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"), None),
-]
+MARGIN_BOTTOM_PT = MARGIN_BOTTOM_MM * MM_TO_PT
+FOOTER_BASELINE_PT = MARGIN_BOTTOM_PT * 0.45
 
 
 def register_first(logical_name: str, candidates: list[tuple[Path, int | None]],
@@ -104,12 +83,6 @@ def draw_runs(page, runs: list[tuple[str, str]], x: float, baseline: float, size
         x += pdfmetrics.stringWidth(text, font, size)
 
 
-def draw_right_aligned(page, runs: list[tuple[str, str]], right_edge: float,
-                       baseline: float, size: float) -> None:
-    total = sum(pdfmetrics.stringWidth(text, font, size) for font, text in runs)
-    draw_runs(page, runs, right_edge - total, baseline, size)
-
-
 def parse_pages(txt_path: Path) -> list[list[str]]:
     text = txt_path.read_text(encoding="utf-8")
     if text.endswith("\n"):
@@ -143,7 +116,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provenance", required=True, type=Path)
     parser.add_argument("--facts", required=True, type=Path)
-    parser.add_argument("--volume", required=True, choices=["all", "front_30", "back_30"])
+    parser.add_argument("--volume", required=True, choices=["front", "back"])
     parser.add_argument("--pdf", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--render-dir", type=Path)
@@ -152,11 +125,10 @@ def main() -> int:
     started = time.perf_counter()
 
     cjk = register_first("SoftCertCJK", CJK_CANDIDATES, "SOFTCERT_CODE_CJK_FONT")
-    ascii_mono = register_first("SoftCertMono", ASCII_CANDIDATES, "SOFTCERT_CODE_ASCII_FONT")
-    if not cjk or not ascii_mono:
-        print("RENDER_UNAVAILABLE=no usable TrueType fonts (CJK monospace pair)", file=sys.stderr)
+    ascii_font = register_first("SoftCertCalibri", ASCII_CANDIDATES, "SOFTCERT_CODE_ASCII_FONT")
+    if not cjk or not ascii_font:
+        print("RENDER_UNAVAILABLE=no usable TrueType fonts (Calibri and CJK)", file=sys.stderr)
         return 4
-    latin_text = register_first("SoftCertLatin", LATIN_TEXT_CANDIDATES, "SOFTCERT_CODE_LATIN_FONT") or ascii_mono
 
     provenance = load_json(args.provenance)
     facts = load_json(args.facts)
@@ -179,49 +151,33 @@ def main() -> int:
         print(f"RENDER_ERROR=expected {expected} pages, composed {len(pages)}", file=sys.stderr)
         return 2
 
-    # Carry the source-effective density into the render receipt.  The front
-    # volume's page 30 is not the filing's final page, so only the global last
-    # logical page receives the short-page exception.
     logical_pages = list(groups[args.volume].get("logical_source_pages", []))
-    page_meta = provenance.get("pages", [])
-    quota = int(provenance.get("lines_per_page", 50))
-    effective_lines = [int(page_meta[number - 1].get("effective_lines", page_meta[number - 1].get("line_count", 0)))
-                       for number in logical_pages if 0 < number <= len(page_meta)]
-    short_pages = [index + 1 for index, (number, value) in enumerate(zip(logical_pages, effective_lines))
-                   if number != int(provenance.get("full_page_count", 0)) and value < quota]
-    if short_pages:
-        print(f"RENDER_ERROR=non-final pages under {quota} effective lines: {short_pages}", file=sys.stderr)
-        return 2
+    page_meta = [item for item in provenance.get("pages", []) if item.get("volume") == args.volume]
+    effective_lines = [int(item.get("effective_lines", item.get("line_count", 0))) for item in page_meta]
 
     layout = provenance.get("layout", {})
-    font_size = float(layout.get("font_size_pt", 10.0))
-    line_height = float(layout.get("line_spacing_pt", 14.1))
-    page_start = 31 if args.volume == "back_30" else 1
-    filing_total = sum(int(item.get("page_count", 0)) for item in groups.values())
-    header_text = f"{facts.get('software_full_name', '软件源程序')}{facts.get('version', '')}"
-    header_runs = line_runs(header_text, latin_text, cjk)
+    font_size = float(layout.get("font_size_pt", FONT_SIZE_PT))
+    line_height = float(layout.get("line_spacing_pt", LINE_SPACING_PT))
+    page_start = int(groups[args.volume].get("page_number_start", 1))
 
     descent = max(abs(pdfmetrics.getAscentDescent(font, font_size)[1])
-                  for font in (ascii_mono, cjk))
+                  for font in (ascii_font, cjk))
     args.pdf.parent.mkdir(parents=True, exist_ok=True)
     page = canvas.Canvas(str(args.pdf), pagesize=(PAGE_WIDTH_PT, PAGE_HEIGHT_PT),
                          pageCompression=1, invariant=1)
-    page.setTitle(f"{header_text} 源程序")
+    page.setTitle("源代码")
     page.setCreator("software-certificate-skill direct renderer")
     page.setFillColor(black)
     for index, lines in enumerate(pages):
-        # Unified filing header: name + version on the left, page number on
-        # the right, empty footer — matching the DOCX siblings.
-        header_baseline = PAGE_HEIGHT_PT - HEADER_BASELINE_FROM_TOP_PT
-        draw_runs(page, header_runs, MARGIN_LEFT_PT, header_baseline, HEADER_SIZE)
-        page_runs = line_runs(f"第 {page_start + index} 页", latin_text, cjk)
-        draw_right_aligned(page, page_runs, PAGE_WIDTH_PT - MARGIN_RIGHT_PT,
-                           header_baseline, HEADER_SIZE)
+        footer = f"- {page_start + index} -"
+        footer_width = pdfmetrics.stringWidth(footer, ascii_font, font_size)
+        page.setFont(ascii_font, font_size)
+        page.drawString((PAGE_WIDTH_PT - footer_width) / 2.0, FOOTER_BASELINE_PT, footer)
         for line_no, line in enumerate(lines):
             if not line:
                 continue
             baseline = PAGE_HEIGHT_PT - MARGIN_TOP_PT - (line_no + 1) * line_height + descent
-            draw_runs(page, line_runs(line, ascii_mono, cjk), MARGIN_LEFT_PT, baseline, font_size)
+            draw_runs(page, line_runs(line, ascii_font, cjk), MARGIN_LEFT_PT, baseline, font_size)
         page.showPage()
     page.save()
 
@@ -246,16 +202,15 @@ def main() -> int:
         "pdf_sha256": sha256_file(args.pdf),
         "pdf_pages": actual_pages,
         "expected_pages": expected,
+        "software_full_name": facts.get("software_full_name", ""),
         "logical_source_pages": logical_pages,
         "effective_lines": effective_lines,
-        "density": {"quota": quota, "nonfinal_short_pages": short_pages,
-                     "status": "pass" if not short_pages else "fail"},
         "rendered_pages": len(rendered),
         "conversion": {"engine": "Direct PDF (ReportLab)", "label": "direct-pdf",
                        "status": "pass" if not issues else "fail",
                        "elapsed_seconds": elapsed,
-                       "fonts": {"ascii": ascii_mono, "cjk": cjk, "latin_text": latin_text},
-                       "pagination": "fixed line grid, correct by construction"},
+                       "fonts": {"ascii": ascii_font, "cjk": cjk, "requested_ascii": ASCII_FONT},
+                       "pagination": "fixed line grid, footer page number, no header"},
         "conversion_attempts": [{"engine": "Direct PDF (ReportLab)",
                                  "status": "pass" if not issues else "fail", "diagnostic": None}],
         "render": {"status": "pass" if rendered else "skipped", "mode": "spot_check", "diagnostic": None},

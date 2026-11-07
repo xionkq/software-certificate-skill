@@ -24,16 +24,26 @@ class WorkflowGuardTests(unittest.TestCase):
         self.assertEqual(findings[0]["marker"], "stylefeng")
         self.assertEqual(findings[0]["line"], 2)
 
-    def test_nonfinal_effective_density_is_hard_gate(self):
-        self.assertEqual(provenance_density({"lines_per_page": 50,
-                                             "pages": [{"effective_lines": 50}, {"effective_lines": 50},
-                                                       {"effective_lines": 12}]}),
-                         (True, "非末页均达到50行；末页12行（末页例外）"))
-        ok, detail = provenance_density({"lines_per_page": 50,
-                                         "pages": [{"effective_lines": 50}, {"effective_lines": 49},
-                                                   {"effective_lines": 12}]})
-        self.assertFalse(ok)
-        self.assertIn("[2]", detail)
+    def test_volume_page_window_is_hard_gate(self):
+        ready = {
+            "selection": "file_aligned_front_back",
+            "gap_files": ["src/gap.py"],
+            "filing_groups": {
+                "front": {"page_count": 60, "files": ["src/a.py"]},
+                "back": {"page_count": 62, "files": ["src/b.py"]},
+            },
+        }
+        ok, detail = provenance_density(ready)
+        self.assertTrue(ok, detail)
+        self.assertIn("合计122页", detail)
+        short = json.loads(json.dumps(ready))
+        short["filing_groups"]["front"]["page_count"] = 50
+        failed, detail = provenance_density(short)
+        self.assertFalse(failed)
+        self.assertIn("页数不在窗口内", detail)
+        blocked, detail = provenance_density({"selection": "blocked", "block_reason": "源码不足"})
+        self.assertFalse(blocked)
+        self.assertIn("源码不足", detail)
 
     def test_required_skip_stops_before_placeholder_generation(self):
         with tempfile.TemporaryDirectory(prefix="softcert-workflow-guards-") as temp:

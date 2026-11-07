@@ -37,16 +37,19 @@ class DirectCodePdfTests(unittest.TestCase):
             root = Path(temp)
             project, output = root / "project", root / "output"
             project.mkdir()
-            lines = []
-            for index in range(1, 161):
-                if index % 40 == 0:
-                    lines.append(f"    # 校验第{index}条库存记录并同步审计日志，超限时触发预警。")
-                else:
-                    lines.append(f"value_{index} = process_item({index}, mode='standard')")
-            (project / "engine.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            ordered = []
+            for index in range(80):
+                relative = f"src/service_{index:03d}.py"
+                path = project / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                lines = [f"value_{index}_{line} = process_item({line}, mode='standard')" for line in range(80)]
+                if index == 0:
+                    lines[0] = "# 校验第1条库存记录"
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                ordered.append(relative)
             manifest = project / "manifest.json"
             manifest.write_text(json.dumps({
-                "include": ["**/*.py"], "exclude": [], "ordered_files": ["engine.py"],
+                "include": ["**/*.py"], "exclude": [], "ordered_files": ordered,
                 "review": {"confirmed_by": "unit", "confirmed_at": "2026-08-12T00:00:00+08:00",
                            "open_source_boundary_checked": True, "generated_code_boundary_checked": True,
                            "secret_scan_checked": True}}, ensure_ascii=False), encoding="utf-8")
@@ -59,7 +62,7 @@ class DirectCodePdfTests(unittest.TestCase):
             ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             self.assertEqual(compose.returncode, 0, compose.stdout + compose.stderr)
             provenance = json.loads((output / "source-provenance.json").read_text(encoding="utf-8"))
-            expected_pages = provenance["filing_groups"]["all"]["page_count"]
+            expected_pages = provenance["filing_groups"]["front"]["page_count"]
 
             digests = []
             for round_no in (1, 2):
@@ -68,7 +71,7 @@ class DirectCodePdfTests(unittest.TestCase):
                 render = subprocess.run([
                     sys.executable, str(SCRIPTS / "render_code_pdf.py"),
                     "--provenance", str(output / "source-provenance.json"), "--facts", str(facts),
-                    "--volume", "all", "--pdf", str(pdf), "--report", str(report_path),
+                    "--volume", "front", "--pdf", str(pdf), "--report", str(report_path),
                     "--expected-pages", str(expected_pages),
                 ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
                 self.assertEqual(render.returncode, 0, render.stdout + render.stderr)
@@ -78,13 +81,10 @@ class DirectCodePdfTests(unittest.TestCase):
                 reader = PdfReader(str(pdf))
                 self.assertEqual(len(reader.pages), expected_pages)
                 first_page_text = reader.pages[0].extract_text()
-                self.assertIn("process_item", first_page_text)
-                # pypdf splits extracted text at font-run boundaries.
+                self.assertIn("校验", first_page_text)
                 compact = first_page_text.replace(" ", "").replace("\n", "")
-                # Unified filing header: name + version, then the page number.
-                self.assertIn("直绘测试系统V1.0", compact)
-                self.assertIn("第1页", compact)
-                self.assertNotIn("共", compact.split("value_")[0])
+                self.assertNotIn("直绘测试系统", compact)
+                self.assertIn("-1-", compact)
                 digests.append(__import__("hashlib").sha256(pdf.read_bytes()).hexdigest())
             self.assertEqual(digests[0], digests[1], "direct rendering must be byte-stable")
 

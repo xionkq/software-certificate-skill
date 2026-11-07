@@ -340,8 +340,8 @@ class BackendCoverageGateTests(unittest.TestCase):
                 {"path": "backend/b.py", "output_start_line": 101, "output_end_line": 200},
             ],
             "filing_groups": {
-                "front_30": {"first_output_line": 1, "last_output_line": front_last},
-                "back_30": {"first_output_line": 51, "last_output_line": 200},
+                "front": {"files": ["src/a.vue", "backend/b.py"] if front_last >= 101 else ["src/a.vue"]},
+                "back": {"files": ["backend/b.py"]},
             },
         }
 
@@ -352,7 +352,7 @@ class BackendCoverageGateTests(unittest.TestCase):
     def test_fails_when_one_volume_misses_backend(self):
         covered, detail = product_verify.backend_side_coverage(self.provenance(front_last=90))
         self.assertFalse(covered)
-        self.assertIn("front_30", detail)
+        self.assertIn("front", detail)
 
     def test_fails_when_no_backend_file_composed(self):
         data = self.provenance()

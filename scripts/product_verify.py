@@ -52,16 +52,13 @@ def backend_side_coverage(provenance: dict[str, Any]) -> tuple[bool, str]:
     """
     sides = {item.get("path"): item.get("side") for item in provenance.get("file_decisions", [])}
     file_records = provenance.get("files", [])
-    composed_backend = sum(1 for item in file_records if sides.get(item.get("path")) == "backend")
+    composed_backend = [item.get("path") for item in file_records if sides.get(item.get("path")) == "backend"]
     if not composed_backend:
         return False, "项目含后端实现，但代码材料未纳入任何后端源文件；须重新选择源码"
     missing: list[str] = []
     for name, group in provenance.get("filing_groups", {}).items():
-        first = group.get("first_output_line") or 0
-        last = group.get("last_output_line") or 0
-        volume_sides = {sides.get(item.get("path")) for item in file_records
-                        if item.get("output_end_line", 0) >= first and item.get("output_start_line", 0) <= last}
-        if "backend" not in volume_sides:
+        listed = group.get("files") or []
+        if not any(sides.get(path) == "backend" for path in listed):
             missing.append(name)
     if missing:
         return False, ("以下交存卷不含后端源码：" + "、".join(sorted(missing))
@@ -130,11 +127,8 @@ def main() -> int:
     version = facts.get("version", "")
     expected = ["申请表信息.txt", f"{software_filename}_操作手册.docx", f"{software_filename}_操作手册.pdf"]
     groups = provenance.get("filing_groups", {})
-    if "all" in groups:
-        expected += [f"{software_filename}-代码(全部).docx", f"{software_filename}-代码(全部).pdf"]
-    else:
-        expected += [f"{software_filename}-代码(前30页).docx", f"{software_filename}-代码(前30页).pdf",
-                     f"{software_filename}-代码(后30页).docx", f"{software_filename}-代码(后30页).pdf"]
+    expected += ["源代码（前30页）.docx", "源代码（前30页）.pdf",
+                 "源代码（后30页）.docx", "源代码（后30页）.pdf"]
     checks: list[dict[str, Any]] = []
     missing = [name for name in expected if not (formal / name).is_file()]
     actual = {path.name for path in formal.iterdir() if path.is_file()}
@@ -155,15 +149,23 @@ def main() -> int:
     valid_docx, docx_errors = True, []
     for path in docx_files:
         try:
-            text = docx_text(path)
-            if not text or software not in text or version not in text:
+            if not docx_text(path):
                 valid_docx = False
                 docx_errors.append(path.name)
         except Exception:
             valid_docx = False
             docx_errors.append(path.name)
-    checks.append(check("DOCX结构与页眉事实", valid_docx and bool(docx_files), "异常：" + "、".join(docx_errors) if docx_errors else f"{len(docx_files)}个DOCX结构可读"))
+    manual_text = ""
     manual_docx_path = formal / f"{software_filename}_操作手册.docx"
+    if manual_docx_path.is_file():
+        try:
+            manual_text = docx_text(manual_docx_path)
+        except Exception:
+            manual_text = ""
+    manual_header_ok = bool(manual_text) and software in manual_text and version in manual_text
+    checks.append(check("DOCX结构与页眉事实", valid_docx and bool(docx_files) and manual_header_ok,
+                        "异常：" + "、".join(docx_errors) if docx_errors or not manual_header_ok
+                        else f"{len(docx_files)}个DOCX结构可读；操作手册含软件名称与版本，代码卷无页眉"))
     toc = toc_metrics(manual_docx_path)
     toc_ok = all(toc.get(key) for key in ("toc_field", "hyperlink_switch", "materialized_hyperlinks",
                                            "bookmarks", "page_reference_fields", "update_fields"))
@@ -189,25 +191,30 @@ def main() -> int:
     mapping = provenance.get("line_mapping", [])
     sample_ok = bool(mapping) and all(item.get("file") and item.get("source_line") for item in mapping[::max(1, len(mapping)//20)])
     checks.append(check("代码真实性抽样追溯", sample_ok, f"映射记录{len(mapping)}条"))
-    group_ok = False
-    if "all" in groups:
-        group_ok = groups["all"].get("page_count") == provenance.get("full_page_count") and provenance.get("full_page_count", 0) < 60
-    elif {"front_30", "back_30"} <= set(groups):
-        front, back = groups["front_30"], groups["back_30"]
-        group_ok = front.get("page_count") == 30 and back.get("page_count") == 30 and \
-                   front.get("logical_source_pages") == list(range(1, 31)) and \
-                   back.get("logical_source_pages", [])[-1:] == [provenance.get("full_page_count")]
-    checks.append(check("代码页数与前后卷连续性", group_ok, f"总逻辑页{provenance.get('full_page_count')}；分卷{list(groups)}"))
-    # Reviewers count effective source lines — a wrapped long line is still
-    # one line. Every page but the last must carry the full quota.
-    page_meta = provenance.get("pages", [])
-    quota = int(provenance.get("lines_per_page", 50))
-    effective = [int(item.get("effective_lines", item.get("line_count", 0))) for item in page_meta]
-    short_pages = [index + 1 for index, value in enumerate(effective[:-1]) if value < quota]
-    dense_ok = bool(effective) and not short_pages
-    checks.append(check("代码每页有效行数", dense_ok,
-                        f"每页{quota}条有效源码行；末页{effective[-1] if effective else 0}条（末页例外）"
-                        if dense_ok else f"不足{quota}条的页：{short_pages[:12]}"))
+    front, back = groups.get("front") or {}, groups.get("back") or {}
+    front_pages, back_pages = int(front.get("page_count", 0)), int(back.get("page_count", 0))
+    front_files, back_files = set(front.get("files") or []), set(back.get("files") or [])
+    group_ok = (
+        55 <= front_pages <= 65 and 55 <= back_pages <= 65
+        and 120 <= front_pages + back_pages <= 125
+        and bool(front_files) and bool(back_files)
+        and front_files.isdisjoint(back_files)
+        and bool(provenance.get("gap_files"))
+    )
+    checks.append(check(
+        "代码页数与文件边界", group_ok,
+        f"前{front_pages}页、后{back_pages}页、合计{front_pages + back_pages}页；"
+        f"间隔文件{len(provenance.get('gap_files') or [])}个"
+        if group_ok else f"分卷{list(groups)}未满足各55–65页、合计120–125页且文件不连续"))
+    lines_intact = (
+        provenance.get("selection") == "file_aligned_front_back"
+        and provenance.get("blank_lines_excluded", 1) == 0
+        and bool(mapping)
+    )
+    checks.append(check(
+        "代码行完整且未截断", lines_intact,
+        f"映射记录{len(mapping)}条；空行保留{provenance.get('blank_lines_retained', 0)}行；"
+        f"超长单文件跳过{len(provenance.get('skipped_oversized_files') or [])}个"))
     # A frontend-only repository must not present itself as a full system:
     # the form has to acknowledge the external backend it depends on.
     architecture = str(provenance.get("selection_policy", {}).get("architecture_scope", ""))

@@ -77,18 +77,18 @@ def source_metrics(path: Path | None) -> dict:
     full_pages = int(data.get("full_page_count", 0))
     filing_pages = int(data.get("filing_page_count", 0))
     selection = data.get("selection")
-    selected = data.get("selected_source_pages", [])
-    if full_pages < 60:
-        if selection != "all_under_60_pages" or filing_pages != full_pages:
-            issues.append("under_60_selection_incorrect")
-    else:
-        expected = list(range(1, 31)) + list(range(full_pages - 29, full_pages + 1))
-        if selection not in {"first_30_and_last_30", "first_30_and_last_30_separate_volumes"} or selected != expected:
-            issues.append("front_back_30_selection_incorrect")
+    groups = data.get("filing_groups", {})
+    front, back = groups.get("front") or {}, groups.get("back") or {}
+    front_pages, back_pages = int(front.get("page_count", 0)), int(back.get("page_count", 0))
+    front_files, back_files = set(front.get("files") or []), set(back.get("files") or [])
+    if selection == "blocked" or not front or not back:
+        issues.append("source_filing_blocked")
+    elif not (55 <= front_pages <= 65 and 55 <= back_pages <= 65 and 120 <= front_pages + back_pages <= 125):
+        issues.append("volume_page_window_incorrect")
+    elif front_files & back_files or not data.get("gap_files"):
+        issues.append("volume_files_not_separated")
     pages = data.get("pages", [])
     effective_lines = [int(p.get("effective_lines", p.get("line_count", 0))) for p in pages]
-    if any(value < int(data.get("lines_per_page", 50)) for value in effective_lines[:-1]):
-        issues.append("nonfinal_source_page_under_50_lines")
     review = data.get("manifest_review", {})
     review_ready = all(review.get(key) for key in (
         "confirmed_by", "confirmed_at", "open_source_boundary_checked",
