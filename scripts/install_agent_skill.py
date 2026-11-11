@@ -77,7 +77,7 @@ def managed_block(skill_path: Path) -> str:
     return (
         "<!-- software-certificate-skill:start -->\n"
         "## Software Certificate Skill\n\n"
-        f"When a task involves 软件著作权、软著材料、操作手册、源程序材料或自动截图，"
+        f"When a task involves 软件著作权、软著材料、操作手册、设计说明书、源程序材料或自动截图，"
         f"read and follow `{resolved}/SKILL.md`. Resolve every referenced script, asset and reference "
         f"relative to `{resolved}`. Use the bundled deterministic scripts instead of recreating them.\n"
         "<!-- software-certificate-skill:end -->"

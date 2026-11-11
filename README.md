@@ -5,12 +5,12 @@
 
 <h1 align="center">Software Certificate Skill</h1>
 
-<p align="center">这是一款面向真实项目的软件著作权申请资料生成 Skill，它能够自动分析项目、提取业务证据、选择源码，生成申请表、操作手册、代码材料，并输出可检查的 DOCX 与 PDF。中间证据和诊断文件写入系统临时目录，项目中只保留正式资料。</p>
+<p align="center">这是一款面向真实项目的软件著作权申请资料生成 Skill，它能够自动分析项目、提取业务证据、选择源码，生成申请表、设计说明书、代码材料，并输出可检查的 DOCX。不生成操作手册。中间证据和诊断文件写入系统临时目录，项目中只保留正式资料。</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=FFD43B" alt="Python 3.10+">
     <img src="https://img.shields.io/badge/Agent-Multi--Platform-00A67E?style=flat-square&logo=probot&logoColor=white" alt="Multi-Agent">
-  <img src="https://img.shields.io/badge/Output-DOCX%20%7C%20PDF%20%7C%20TXT-2B579A?style=flat-square&logo=microsoftword&logoColor=white" alt="DOCX, PDF and TXT output">
+  <img src="https://img.shields.io/badge/Output-DOCX%20%7C%20TXT-2B579A?style=flat-square&logo=microsoftword&logoColor=white" alt="DOCX and TXT output">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-F59E0B?style=flat-square&logo=opensourceinitiative&logoColor=white" alt="MIT License"></a>
 </p>
 
@@ -25,20 +25,20 @@
 为当前项目生成软件著作权申请资料
 ```
 
-Agent 会一次收集登记事实并让你选择截图方式，随后完成项目分析、材料生成、PDF 转换、逐页检查和打包。最终交付位置和待确认事项会直接告知你。
+Agent 会一次收集登记事实并让你选择截图方式，随后完成项目分析、材料生成、文档检查和打包。最终交付位置和待确认事项会直接告知你。
 
 ## 交付物
 
 ```text
 正式资料/
 ├─ 申请表信息.txt
-├─ <软件全称>_操作手册.docx / .pdf
-├─ 源代码（前30页）.docx / .pdf
-└─ 源代码（后30页）.docx / .pdf
+├─ <软件全称>软件设计说明书.docx
+├─ 源代码（前30页）.docx
+└─ 源代码（后30页）.docx
 ```
 
 - `申请表信息.txt`：复制到登记系统。
-- DOCX：用于 Word/WPS 检查和编辑；PDF：按登记系统要求上传。
+- DOCX：用于 Word/WPS 检查、编辑和提交。登记系统若要求 PDF，由申请人在提交前自行转换。
 - 代码材料由完整源文件组成，保留原文件、原始行号和哈希，可追溯。
 
 ## 示例
@@ -56,12 +56,12 @@ Agent 会一次收集登记事实并让你选择截图方式，随后完成项�
   <tr>
     <td align="center" ><img width="1197" height="1395" alt="image" src="https://github.com/user-attachments/assets/01401dfd-77e1-4429-9ac8-a439ea7933c4" />
 <sub>生成结果与正式资料目录</sub>
-    <td align="center"><img width="864" height="1213" alt="image" src="https://github.com/user-attachments/assets/e8dd0fcb-affc-48dd-88ce-75fea29f6ea5" /><sub>操作手册页面</sub>
+    <td align="center"><img width="864" height="1213" alt="image" src="https://github.com/user-attachments/assets/e8dd0fcb-affc-48dd-88ce-75fea29f6ea5" /><sub>文档版式示例</sub>
 </td>
   </tr>
   <tr>
     <td align="center"><img width="861" height="1226" alt="image" src="https://github.com/user-attachments/assets/2d517635-4fd8-482f-b0fd-7996d6d0972c" />
-<sub>操作手册页面</sub>
+<sub>文档版式示例</sub>
 </td>
     <td align="center"><img width="857" height="1217" alt="image" src="https://github.com/user-attachments/assets/5ac121cf-c589-4f25-b9ec-7cb99420723f" />
 <sub>代码材料前30页</sub></td>
@@ -118,15 +118,15 @@ python scripts/product_workflow.py status --project E:\path\to\project
 python scripts/product_workflow.py rollback --project E:\path\to\project
 ```
 
-`prepare` 生成集中表单、截图选择卡和内部分析任务；完成表单后运行 `resume`。PDF 转换需要 LibreOffice 或 Microsoft Word（优先 LibreOffice）；逐页渲染需要 Poppler 的 `pdftoppm` 或 `pdftocairo`。
+`prepare` 生成集中表单、截图选择卡和内部分析任务；完成表单后运行 `resume`。正式资料只交付 DOCX，不生成 PDF。
 
 ## 处理范围与约束
 
 - 扫描 README、配置、路由、页面、组件、服务、API、模型、测试、部署和既有截图，功能结论须能回溯到证据或真实运行结果。
 - 支持 Chrome DevTools、Computer Use、用户自行截图和跳过截图四种路线；截图会记录计划、哈希和章节映射。
-- 手册按真实功能组织章节，使用 A4、黑白灰、常规办公排版；内容充分的项目通常为 40–60 页，小项目按证据量缩短。
+- 文档鉴别材料只生成设计说明书，按软件概述、运行环境、主要功能、使用流程四节编排，模块与截图来自同一份业务理解和截图索引。本流程不生成操作手册。
 - 代码材料固定为两卷：`源代码（前30页）` 与 `源代码（后30页）`。每卷 55–65 页，合计 120–125 页；只收录完整源文件，两卷不连续。源码不够或单文件超过 65 页且无法配齐时阻断，不补写代码。
-- 表单、手册、代码页眉、文件名和报告来自同一份已确认事实；支持断点续作、局部重建和最近版本恢复。
+- 表单、设计说明书、文件名和报告来自同一份已确认事实；代码卷不设页眉。支持断点续作、局部重建和最近版本恢复。
 - 规则快照见 [`references/rules-2026.md`](references/rules-2026.md) 和 [`assets/rules/rules-snapshot.json`](assets/rules/rules-snapshot.json)。规则记录区分法定要求与经验建议，并保存来源和日期。
 
 ## 测试

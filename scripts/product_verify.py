@@ -26,22 +26,6 @@ def docx_text(path: Path) -> str:
                          for name in archive.namelist() if name.startswith("word/") and name.endswith(".xml"))
 
 
-def toc_metrics(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {"status": "missing"}
-    with zipfile.ZipFile(path) as archive:
-        document = archive.read("word/document.xml").decode("utf-8", "replace")
-        settings = archive.read("word/settings.xml").decode("utf-8", "replace")
-    return {
-        "toc_field": bool(re.search(r"TOC\s+\\o", document)),
-        "hyperlink_switch": "\\h" in document,
-        "materialized_hyperlinks": len(re.findall(r"<w:hyperlink\b", document)),
-        "bookmarks": len(re.findall(r"<w:bookmarkStart\b", document)),
-        "page_reference_fields": len(re.findall(r"PAGEREF\s+_SoftCertToc", document)),
-        "update_fields": bool(re.search(r"<w:updateFields[^>]*w:val=[\"'](?:true|1)[\"']", settings)),
-    }
-
-
 def backend_side_coverage(provenance: dict[str, Any]) -> tuple[bool, str]:
     """Every filing volume of a both-sided corpus must show backend source.
 
@@ -110,25 +94,24 @@ def main() -> int:
     parser.add_argument("--quality", required=True, type=Path)
     parser.add_argument("--facts", required=True, type=Path)
     parser.add_argument("--business", required=True, type=Path)
-    parser.add_argument("--manual-content", required=True, type=Path)
+    parser.add_argument("--design-spec-content", required=True, type=Path)
     parser.add_argument("--application-model", required=True, type=Path)
     parser.add_argument("--provenance", required=True, type=Path)
     parser.add_argument("--screenshot-index", required=True, type=Path)
-    parser.add_argument("--render-reports", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     formal, quality = args.formal.resolve(), args.quality.resolve()
     facts, business = load_json(args.facts), load_json(args.business)
-    manual_content = load_json(args.manual_content)
+    design_spec = load_json(args.design_spec_content)
     application, provenance = load_json(args.application_model), load_json(args.provenance)
     screenshots = load_json(args.screenshot_index) if args.screenshot_index.exists() else {"captures": []}
     software = facts.get("software_full_name", "")
     software_filename = safe_filename(software)
     version = facts.get("version", "")
-    expected = ["申请表信息.txt", f"{software_filename}_操作手册.docx", f"{software_filename}_操作手册.pdf"]
+    spec_filename = f"{software_filename}软件设计说明书"
+    expected = ["申请表信息.txt", f"{spec_filename}.docx"]
     groups = provenance.get("filing_groups", {})
-    expected += ["源代码（前30页）.docx", "源代码（前30页）.pdf",
-                 "源代码（后30页）.docx", "源代码（后30页）.pdf"]
+    expected += ["源代码（前30页）.docx", "源代码（后30页）.docx"]
     checks: list[dict[str, Any]] = []
     missing = [name for name in expected if not (formal / name).is_file()]
     actual = {path.name for path in formal.iterdir() if path.is_file()}
@@ -155,39 +138,9 @@ def main() -> int:
         except Exception:
             valid_docx = False
             docx_errors.append(path.name)
-    manual_text = ""
-    manual_docx_path = formal / f"{software_filename}_操作手册.docx"
-    if manual_docx_path.is_file():
-        try:
-            manual_text = docx_text(manual_docx_path)
-        except Exception:
-            manual_text = ""
-    manual_header_ok = bool(manual_text) and software in manual_text and version in manual_text
-    checks.append(check("DOCX结构与页眉事实", valid_docx and bool(docx_files) and manual_header_ok,
-                        "异常：" + "、".join(docx_errors) if docx_errors or not manual_header_ok
-                        else f"{len(docx_files)}个DOCX结构可读；操作手册含软件名称与版本，代码卷无页眉"))
-    toc = toc_metrics(manual_docx_path)
-    toc_ok = all(toc.get(key) for key in ("toc_field", "hyperlink_switch", "materialized_hyperlinks",
-                                           "bookmarks", "page_reference_fields", "update_fields"))
-    checks.append(check("智能目录与可点击跳转", toc_ok,
-                        f"TOC域={toc.get('toc_field')}；超链接={toc.get('materialized_hyperlinks', 0)}；"
-                        f"书签={toc.get('bookmarks', 0)}；动态页码={toc.get('page_reference_fields', 0)}"))
-    render_files = list(args.render_reports.resolve().glob("*.json")) if args.render_reports.exists() else []
-    render_models = [load_json(path) for path in render_files]
-    render_ok = bool(render_models) and all(item.get("status") == "pass" for item in render_models)
-    checks.append(check("PDF转换与逐页渲染", render_ok, f"报告{len(render_models)}份；失败{sum(item.get('status') != 'pass' for item in render_models)}份"))
-    manual_render = next((item for item in render_models if Path(item.get("input", "")).name == "manual.docx"), {})
-    manual_pdf_pages = int(manual_render.get("pdf_pages", 0))
-    logical_sections = int(manual_content.get("generation", {}).get("logical_sections", 0))
-    preferred_applicable = logical_sections >= 40
-    manual_length_ok = manual_pdf_pages > 0 and manual_pdf_pages <= 66 and (
-        not preferred_applicable or manual_pdf_pages >= 40
-    )
-    length_reason = (
-        f"实际PDF {manual_pdf_pages}页；内容逻辑页{logical_sections}页；"
-        + ("按丰富度适用40–60页优选区间" if preferred_applicable else "小型项目按证据量缩短，不填充无效内容")
-    )
-    checks.append(check("操作手册页数与内容丰富度", manual_length_ok, length_reason))
+    checks.append(check("DOCX结构", valid_docx and bool(docx_files),
+                        "异常：" + "、".join(docx_errors) if docx_errors or not valid_docx or not docx_files
+                        else f"{len(docx_files)}个DOCX结构可读"))
     mapping = provenance.get("line_mapping", [])
     sample_ok = bool(mapping) and all(item.get("file") and item.get("source_line") for item in mapping[::max(1, len(mapping)//20)])
     checks.append(check("代码真实性抽样追溯", sample_ok, f"映射记录{len(mapping)}条"))
@@ -236,10 +189,41 @@ def main() -> int:
     elif architecture and architecture != "unclassified":
         checks.append(check("申请范围与源码架构一致", True, f"架构范围：{architecture}"))
     evidence_ok = bool(business.get("capabilities")) and all(item.get("evidence_ids") for item in business.get("capabilities", []))
-    checks.append(check("操作手册业务证据", evidence_ok, f"已确认功能{len(business.get('capabilities', []))}项"))
-    manual_quality = manual_content.get("content_quality", {})
-    checks.append(check("操作手册内容厚度与非模板化", manual_quality.get("status") == "pass",
-                        f"问题数：{len(manual_quality.get('issues', []))}；重复句式比例：{manual_quality.get('metrics', {}).get('repeated_sentence_ratio', 'unknown')}"))
+    checks.append(check("业务功能证据", evidence_ok, f"已确认功能{len(business.get('capabilities', []))}项"))
+    spec_generation = design_spec.get("generation", {})
+    spec_docx_path = formal / f"{spec_filename}.docx"
+    spec_text = docx_text(spec_docx_path)
+    section_titles = spec_generation.get("section_titles") or ["1.软件概述", "2.运行环境", "3.主要功能", "4.使用流程"]
+    sections_present = all(title in spec_text for title in section_titles)
+    identity_present = bool(spec_text) and software in spec_text and version in spec_text and "软件设计说明书" in spec_text
+    checks.append(check("设计说明书四节结构", sections_present and identity_present,
+                        "四节、软件名称、版本和文档名均在正文中" if sections_present and identity_present
+                        else "设计说明书缺少固定四节或未写入软件名称与版本"))
+    module_names = [str(item) for item in spec_generation.get("module_names") or []]
+    function_paragraph = str(spec_generation.get("function_paragraph") or "")
+    flow_headings = [str(item) for item in spec_generation.get("flow_headings") or []]
+    modules_aligned = bool(module_names) and all(name in function_paragraph for name in module_names) and all(
+        f"4.{index}{name}" in flow_headings for index, name in enumerate(module_names, 1)
+    )
+    headings_in_docx = all(heading in spec_text for heading in flow_headings)
+    checks.append(check("设计说明书模块一致", modules_aligned and headings_in_docx,
+                        f"模块{len(module_names)}个，使用流程标题{len(flow_headings)}个"
+                        if modules_aligned and headings_in_docx else "第3节模块与第4节标题不一致"))
+    captions = [str(item) for item in spec_generation.get("figure_captions") or []]
+    expected_captions = [f"图{index}" for index in range(1, len(captions) + 1)]
+    captions_in_docx = all(re.search(rf"(?<!\d){re.escape(caption)}(?!\d)", spec_text) for caption in captions)
+    spec_document_xml = ""
+    if spec_docx_path.is_file():
+        with zipfile.ZipFile(spec_docx_path) as archive:
+            spec_document_xml = archive.read("word/document.xml").decode("utf-8", "replace")
+            footer_xml = "\n".join(archive.read(name).decode("utf-8", "replace")
+                                   for name in archive.namelist() if name.startswith("word/footer"))
+    else:
+        footer_xml = ""
+    figure_ok = captions == expected_captions and captions_in_docx and "TOC" not in spec_document_xml and " PAGE " in footer_xml
+    checks.append(check("设计说明书图号与版式", figure_ok,
+                        f"图号{len(captions)}个，页脚页码已设置，无目录域" if figure_ok
+                        else "图号不连续，或设计说明书误含目录、缺少页脚页码"))
     captures_ok, capture_detail = screenshot_release_check(args.screenshot_index.resolve(), screenshots)
     checks.append(check("截图清晰度、来源与章节映射", captures_ok, capture_detail))
     slots = find_slots({"facts": facts, "business": business, "application": application})

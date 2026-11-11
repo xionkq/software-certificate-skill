@@ -19,7 +19,7 @@ from common import load_json, now_iso, save_json, sha256_file, sha256_text
 
 STAGES = (
     "environment", "project_analysis", "business_understanding", "intake",
-    "application_form", "source_selection", "screenshots", "manual",
+    "application_form", "source_selection", "screenshots", "manual", "design_spec",
     "code_material", "render", "verification", "release",
 )
 

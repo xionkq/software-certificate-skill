@@ -254,7 +254,7 @@ def prepare(paths: ProductPaths) -> int:
     synthesis = paths.work / "业务理解任务.md"
     synthesis.write_text("""# 模型业务理解任务
 
-Agent 读取 evidence-graph.json、project-analysis.json、README、路由、页面、服务、模型、测试、部署配置和真实运行结果，完成 business-understanding.json。不得只凭文件名下结论；每项 capability 必须带 evidence_ids，界面事实优先由运行结果确认。purpose 必须写清业务对象、动作和结果，禁止重复“用于支撑实际业务处理”等套话；按真实页面差异填写 inputs、outputs、business_rules、state_changes、result_fields 和 error_cases。可用 manual_titles 为复杂功能提供贴合业务的过程、结果和异常小节标题。该文件是内部工作件，不转交普通用户填写。
+Agent 读取 evidence-graph.json、project-analysis.json、README、路由、页面、服务、模型、测试、部署配置和真实运行结果，完成 business-understanding.json。不得只凭文件名下结论；每项 capability 必须带 evidence_ids，界面事实优先由运行结果确认。purpose 必须写清业务对象、动作和结果，禁止重复“用于支撑实际业务处理”等套话；按真实页面差异填写 inputs、outputs、business_rules、state_changes、result_fields 和 error_cases。本流程不生成操作手册。设计说明书另用可选 modules：每个模块含 name、summary、flow_narrative、screenshot_ids，界面下有多个独立子页面时写入 children；硬件最低配置写入 hardware_requirements，项目资料没有 CPU、内存或硬盘要求时留空，不要编造。未写 modules 时，设计说明书按 capabilities 逐项成节。该文件是内部工作件，不转交普通用户填写。
 """, encoding="utf-8")
     screenshot_card, screenshot_task = write_screenshot_card(paths, analysis_data)
     record_stage(paths, state, "business_understanding", "needs_model_synthesis", hash_inputs([analysis, evidence]), [business, synthesis])
@@ -427,34 +427,29 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
             encoding="utf-8")
         record_stage(paths, state, "release", "blocked_by_screenshots",
                      hash_inputs([screenshots, business]), [screenshots, pending],
-                     "正式资料模式禁止在截图缺失时继续生成手册和代码材料")
+                     "正式资料模式禁止在截图缺失时继续生成设计说明书和代码材料")
         progress("正式资料需要先完成截图，当前流程已暂停")
         print(f"SCREENSHOT_REQUIRED={pending}")
         return 2
 
-    progress("正在生成操作手册")
-    manual_json, manual_docx = paths.work / "manual-content.json", paths.work / "manual.docx"
-    manual_args = ["--facts", str(paths.work / "application-facts.json"), "--business", str(business),
-                   "--screenshots", str(screenshots), "--output", str(manual_json)]
+    record_stage(paths, state, "manual", "skipped", hash_inputs([screenshots, business]), [],
+                 "主流程不再生成操作手册")
+
+    progress("正在生成设计说明书")
+    spec_json, spec_docx = paths.work / "design-spec-content.json", paths.work / "design-spec.docx"
+    spec_args = ["--facts", str(paths.work / "application-facts.json"), "--business", str(business),
+                 "--screenshots", str(screenshots), "--output", str(spec_json)]
     if placeholders:
-        manual_args.append("--allow-placeholders")
-    run_script("generate_manual_content.py", manual_args, {0, 4})
-    run_script("build_manual.py", ["--input", str(manual_json), "--theme", str(SKILL_ROOT / "assets/themes/standard-filing-gray.json"),
-               "--output", str(manual_docx)])
-    record_stage(paths, state, "manual", "complete", hash_inputs([manual_json, screenshots]), [manual_json, manual_docx])
+        spec_args.append("--allow-placeholders")
+    run_script("generate_design_spec_content.py", spec_args, {0})
+    run_script("build_design_spec.py", ["--input", str(spec_json), "--output", str(spec_docx)])
+    record_stage(paths, state, "design_spec", "complete", hash_inputs([spec_json, screenshots]), [spec_json, spec_docx])
 
     progress("正在生成代码材料")
     code_dir = paths.work / "code-material"
     code_dir.mkdir(parents=True, exist_ok=True)
     provenance = code_dir / "source-provenance.json"
-    render_dir = paths.work / "render-reports"
-    render_dir.mkdir(parents=True, exist_ok=True)
     software = safe_filename(facts["software_full_name"])
-    # Code volume PDFs are drawn directly on the composed line grid. Office
-    # conversion stays as the fallback when reportlab or Calibri/CJK fonts
-    # are unavailable. Font size stays at 五号; page count is not recovered
-    # by shrinking type.
-    code_pdf_engine = os.environ.get("SOFTCERT_CODE_PDF_ENGINE", "direct")
     composed = run_script("compose_code.py", [
         "--project", str(paths.project), "--manifest", str(manifest),
         "--facts", str(paths.work / "application-facts.json"),
@@ -475,28 +470,12 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
     density_ok, density_detail = provenance_density(prov)
     if not density_ok:
         raise RuntimeError(f"代码分页检查失败：{density_detail}")
-    formal_specs = [
-        (code_dir / "source-front.docx", "源代码（前30页）", int(prov["filing_groups"]["front"]["page_count"]), "front"),
-        (code_dir / "source-back.docx", "源代码（后30页）", int(prov["filing_groups"]["back"]["page_count"]), "back"),
+    code_volumes = [
+        (code_dir / "source-front.docx", "源代码（前30页）"),
+        (code_dir / "source-back.docx", "源代码（后30页）"),
     ]
-    converted: list[tuple[Path, Path, Path]] = []
-    for docx, name, expected_pages, volume in formal_specs:
-        pdf, report = code_dir / f"{name}.pdf", render_dir / f"{name}.json"
-        if code_pdf_engine == "direct":
-            try:
-                run_script("render_code_pdf.py", ["--provenance", str(provenance),
-                           "--facts", str(paths.work / "application-facts.json"),
-                           "--volume", volume, "--pdf", str(pdf), "--report", str(report),
-                           "--render-dir", str(paths.work / "rendered" / name),
-                           "--expected-pages", str(expected_pages)], timeout_seconds=120)
-            except RuntimeError:
-                code_pdf_engine = "legacy"
-        if code_pdf_engine == "legacy":
-            run_script("convert_document.py", ["--input", str(docx), "--pdf", str(pdf), "--report", str(report),
-                       "--render-dir", str(paths.work / "rendered" / name), "--expected-pages", str(expected_pages)],
-                       timeout_seconds=420)
-        converted.append((docx, pdf, report))
-    record_stage(paths, state, "code_material", "complete", hash_inputs([manifest, provenance]), [provenance] + [item for group in converted for item in group[:2]])
+    record_stage(paths, state, "code_material", "complete", hash_inputs([manifest, provenance]),
+                 [provenance] + [docx for docx, _name in code_volumes])
 
     progress("正在整理申请表")
     application_txt = paths.work / "申请表信息.txt"
@@ -506,12 +485,9 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
                "--model-output", str(application_model)])
     record_stage(paths, state, "application_form", "complete", hash_inputs([intake, business, provenance]), [application_txt, application_model])
 
-    progress("正在渲染并检查文档")
-    manual_pdf, manual_render = paths.work / "manual.pdf", render_dir / "操作手册.json"
-    run_script("convert_document.py", ["--input", str(manual_docx), "--pdf", str(manual_pdf), "--report", str(manual_render),
-               "--render-dir", str(paths.work / "rendered" / "操作手册")], timeout_seconds=420)
-    record_stage(paths, state, "render", "complete", hash_inputs([manual_docx] + [item[0] for item in converted]),
-                 [manual_pdf, manual_render] + [item[1] for item in converted])
+    progress("正在检查文档")
+    record_stage(paths, state, "render", "skipped", hash_inputs([spec_docx]),
+                 [spec_docx], "正式资料只交付 DOCX，不生成 PDF，也不生成操作手册")
 
     publication_root = paths.draft
     existing_draft = [path for path in publication_root.iterdir() if path.is_file()]
@@ -520,11 +496,10 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
         path.unlink()
     publication: list[tuple[Path, Path]] = [
         (application_txt, publication_root / "申请表信息.txt"),
-        (manual_docx, publication_root / f"{software}_操作手册.docx"),
-        (manual_pdf, publication_root / f"{software}_操作手册.pdf"),
+        (spec_docx, publication_root / f"{software}软件设计说明书.docx"),
     ]
-    for (docx, pdf, _), (_, name, _, _) in zip(converted, formal_specs):
-        publication += [(docx, publication_root / f"{name}.docx"), (pdf, publication_root / f"{name}.pdf")]
+    for docx, name in code_volumes:
+        publication.append((docx, publication_root / f"{name}.docx"))
     for source, destination in publication:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temp = destination.with_suffix(destination.suffix + ".tmp")
@@ -534,7 +509,9 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
     shutil.copy2(screenshots, paths.quality / "截图清单.json")
     pending_items = []
     if placeholders:
-        pending_items.append("截图尚未完整获取：当前操作手册含可见截图预留位置；补图后仅重建手册和相关报告。")
+        pending_items.append("截图尚未完整获取：当前设计说明书含可见截图预留位置；补图后重建设计说明书和相关报告。")
+    if load_json(spec_json).get("generation", {}).get("hardware_unspecified"):
+        pending_items.append("设计说明书未找到明确的硬件最低配置，已按“满足上述系统需求的通用计算机”表述。请按实际 CPU、内存和硬盘要求确认。")
     selection_data = load_json(selection_report)
     if selection_data.get("architecture_scope") == "frontend_only":
         pending_items.append(
@@ -580,16 +557,15 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
 
 只有一致性校验报告中的 `release_ready=true` 时，文件才会复制到“正式资料”；否则仅保留为草稿。
 """, encoding="utf-8")
-    code_upload = "源代码（前30页）.pdf 与 源代码（后30页）.pdf"
     (paths.quality / "提交材料清单.md").write_text(f"""# 提交材料清单
 
 当前状态：{'等待截图完成，仅供草稿复核' if placeholders else '等待最终一致性校验'}。
 
 1. 仅在材料进入“正式资料”目录后，打开 `申请表信息.txt` 并复制到登记系统对应字段。
 2. 核对软件全称、版本、著作权人、日期、发表状态和权利范围。
-3. 按登记系统当日页面要求上传 `{software}_操作手册.pdf`。
-4. 上传{code_upload}；DOCX保留作复核和修改。
-5. 提交前确认工作流不存在登记事实或权属阻断项。
+3. 文档鉴别材料上传 `{software}软件设计说明书.docx`。本流程不生成操作手册。
+4. 上传 `源代码（前30页）.docx` 与 `源代码（后30页）.docx`。
+5. 提交前确认工作流不存在登记事实或权属阻断项。登记系统若要求 PDF，由申请人在提交前自行转换；本流程不生成、不检查 PDF。
 
 内部留档：生成报告、校验报告、代码来源、截图清单和 SHA-256 哈希。
 """, encoding="utf-8")
@@ -598,9 +574,9 @@ def generate(paths: ProductPaths, intake_path: Path | None, business_path: Path 
     verification = paths.quality / "材料一致性校验报告.json"
     run_script("product_verify.py", ["--formal", str(publication_root), "--quality", str(paths.quality),
                "--facts", str(paths.work / "application-facts.json"), "--business", str(business),
-               "--manual-content", str(manual_json),
+               "--design-spec-content", str(spec_json),
                "--application-model", str(application_model), "--provenance", str(provenance),
-               "--screenshot-index", str(screenshots), "--render-reports", str(render_dir), "--output", str(verification)], {0, 2})
+               "--screenshot-index", str(screenshots), "--output", str(verification)], {0, 2})
     report_data = load_json(verification)
     (paths.quality / "材料一致性校验报告.md").write_text(markdown_report(report_data), encoding="utf-8")
     write_sha256s(paths.draft, paths.quality / "SHA256SUMS.txt")

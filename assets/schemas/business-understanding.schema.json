@@ -18,6 +18,47 @@
     "startup": {"type": "string"},
     "interface_structure": {"type": "string"},
     "workflow_summary": {"type": "string"},
+    "hardware_requirements": {"type": "string"},
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string", "minLength": 1},
+          "summary": {"type": "string"},
+          "flow_narrative": {"type": "string"},
+          "purpose": {"type": "string"},
+          "entry": {"type": "string"},
+          "visible_elements": {"type": "string"},
+          "screenshot_ids": {"type": "array", "items": {"type": "string"}},
+          "capability_ids": {"type": "array", "items": {"type": "string"}},
+          "evidence_ids": {"type": "array", "items": {"type": "string"}},
+          "children": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string", "minLength": 1},
+                "summary": {"type": "string"},
+                "flow_narrative": {"type": "string"},
+                "purpose": {"type": "string"},
+                "entry": {"type": "string"},
+                "visible_elements": {"type": "string"},
+                "screenshot_ids": {"type": "array", "items": {"type": "string"}},
+                "capability_ids": {"type": "array", "items": {"type": "string"}},
+                "evidence_ids": {"type": "array", "items": {"type": "string"}}
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
     "capabilities": {
       "type": "array",
       "minItems": 1,

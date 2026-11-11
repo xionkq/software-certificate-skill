@@ -108,14 +108,13 @@ class ProductEndToEndTests(unittest.TestCase):
             formal = output / "正式资料"
             expected = {
                 "申请表信息.txt",
-                "文本摘要命令行工具_操作手册.docx",
-                "文本摘要命令行工具_操作手册.pdf",
+                "文本摘要命令行工具软件设计说明书.docx",
                 "源代码（前30页）.docx",
-                "源代码（前30页）.pdf",
                 "源代码（后30页）.docx",
-                "源代码（后30页）.pdf",
             }
-            self.assertEqual({path.name for path in formal.iterdir() if path.is_file()}, expected)
+            names = {path.name for path in formal.iterdir() if path.is_file()}
+            self.assertEqual(names, expected)
+            self.assertFalse(any(name.endswith("_操作手册.docx") for name in names))
             self.assertEqual({path.name for path in output.iterdir()}, {"正式资料"})
 
 
