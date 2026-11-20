@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,10 +18,17 @@ SCRIPTS = ROOT / "scripts"
 
 
 def explicit_docx_pages(path: Path) -> int:
-    """Each page after the first starts with a w:pageBreakBefore paragraph."""
+    """Page count implied by the continuous exact line grid."""
+    sys.path.insert(0, str(SCRIPTS))
+    from compose_code import ROWS_PER_PAGE
     with zipfile.ZipFile(path) as archive:
         xml = archive.read("word/document.xml").decode("utf-8", "replace")
-    return xml.count("w:pageBreakBefore") + 1
+    if "pageBreakBefore" in xml:
+        raise AssertionError("code volume must flow continuously, without pageBreakBefore")
+    paragraphs = len(re.findall(r"<w:p(?:\s|>)", xml))
+    if paragraphs <= 0:
+        return 0
+    return (paragraphs + ROWS_PER_PAGE - 1) // ROWS_PER_PAGE
 
 
 @unittest.skipUnless(os.environ.get("RUN_DOCUMENT_E2E") == "1", "set RUN_DOCUMENT_E2E=1 with LibreOffice available")

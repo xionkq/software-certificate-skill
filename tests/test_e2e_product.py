@@ -69,7 +69,15 @@ class ProductEndToEndTests(unittest.TestCase):
                     "系统对路径格式、文件存在性、文本编码和输出权限分别校验，成功时显示摘要与保存位置，失败时区分输入错误、读取错误和写入错误。核心处理由源码中的读取、规范化、统计和输出函数完成，操作步骤、可见反馈与代码材料保持一致。"
                     "该工具面向需要批量整理文本的内部工作人员，用于减少重复复制和手工统计。结果仅来自实际输入内容，不自动补写不存在的信息；输出文件可继续用于归档、复核或后续分析。"
                 ),
-                "technical_features": "确定性处理、输入校验、明确错误状态", "startup": "运行命令行入口",
+                "technical_features": "确定性处理、输入校验、明确错误状态",
+                "technology_stack": [
+                    {"name": "Python", "usage": "用于实现摘要处理"},
+                    {"name": "pathlib", "usage": "用于定位输入文件"},
+                    {"name": "argparse", "usage": "用于解析命令参数"},
+                    {"name": "JSON", "usage": "用于组织处理结果"},
+                    {"name": "UTF-8", "usage": "用于读取文本编码"},
+                ],
+                "startup": "运行命令行入口",
                 "interface_structure": "命令参数区和结果输出区", "workflow_summary": "输入、处理、查看结果",
                 "capabilities": [{"id": "CAP-core", "name": "摘要处理", "purpose": "生成文本摘要", "actor": "内部工作人员",
                     "entry": "命令行入口", "visible_elements": "输入参数和结果输出", "steps": ["输入文件路径", "执行摘要命令", "查看输出结果"],

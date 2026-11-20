@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from common import load_json, now_iso, save_json
+from generate_design_spec_content import technology_features_text
 
 
 DEFAULT_RULES = Path(__file__).resolve().parents[1] / "assets/rules/application-field-rules.json"
@@ -119,6 +120,10 @@ def main() -> int:
     parser.add_argument("--model-output", required=True, type=Path)
     args = parser.parse_args()
     facts, analysis, business = load_json(args.facts), load_json(args.analysis), load_json(args.business)
+    features = technology_features_text(business)
+    if not features:
+        print("PENDING_TECHNOLOGY_STACK=1")
+        return 2
     provenance = load_json(args.provenance) if args.provenance and args.provenance.exists() else {}
     rules = load_json(args.rules.resolve())
     validate_rules(rules)
@@ -141,7 +146,7 @@ def main() -> int:
         "runtime_support": business.get("runtime_support"),
         "programming_languages": inferences.get("programming_languages", {}).get("suggested_value", []),
         "source_line_count": source_lines, "development_purpose": business.get("development_purpose"),
-        "main_functions": business.get("main_functions"), "technical_features": business.get("technical_features"),
+        "main_functions": business.get("main_functions"), "technical_features": features,
     }
     enums = rules.get("enums", {})
     fields: list[dict[str, Any]] = []

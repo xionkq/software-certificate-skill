@@ -17,7 +17,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from generate_design_spec_content import (GENERIC_HARDWARE, build_payload, environment_lines,
-                                          resolve_modules)
+                                          resolve_modules, technology_features_text)
 
 
 def facts() -> dict:
@@ -33,6 +33,13 @@ def business(**overrides) -> dict:
         "runtime_platform": "Windows、macOS、Linux",
         "runtime_support": "具备文件读写权限的计算机",
         "technical_features": "确定性处理与输入校验",
+        "technology_stack": [
+            {"name": "Python", "usage": "用于实现摘要处理"},
+            {"name": "pathlib", "usage": "用于定位输入文件"},
+            {"name": "argparse", "usage": "解析命令参数"},
+            {"name": "JSON", "usage": "用于组织处理结果"},
+            {"name": "UTF-8", "usage": "用于读取文本编码"},
+        ],
         "capabilities": [
             {"id": "CAP-core", "name": "摘要处理", "purpose": "生成文本摘要", "entry": "命令行入口",
              "visible_elements": "输入参数和结果输出", "evidence_ids": ["FILE-core"],
@@ -73,9 +80,15 @@ class DesignSpecContentTests(unittest.TestCase):
         self.assertIn("【图2】", rendered)
         self.assertEqual(missing, [])
         overview = payload["pages"][1]["blocks"][0]["text"]
-        for fragment in ("内部工作人员", "读取文本并生成规范化摘要", "提高文本摘要处理效率",
-                         "确定性处理与输入校验", "通用软件工具"):
-            self.assertIn(fragment, overview)
+        self.assertEqual(
+            overview,
+            "本系统是面向内部工作人员的文本摘要命令行工具，主要用于读取文本并生成规范化摘要。"
+            "系统采用Python用于实现摘要处理，使用pathlib用于定位输入文件，使用argparse用于解析命令参数，"
+            "使用JSON用于组织处理结果，使用UTF-8用于读取文本编码。本系统旨在提高文本摘要处理效率。",
+        )
+        self.assertNotIn("定位为", overview)
+        self.assertNotIn("确定性处理与输入校验", overview)
+        self.assertNotIn("通用软件工具", overview)
         self.assertNotIn("i5", generation["hardware_text"])
         self.assertNotIn("16G", generation["hardware_text"])
         self.assertEqual(generation["hardware_text"], GENERIC_HARDWARE)
@@ -109,6 +122,42 @@ class DesignSpecContentTests(unittest.TestCase):
         self.assertNotIn("【图2】", rendered)
         self.assertIn("专注训练", payload["generation"]["function_paragraph"])
         self.assertNotIn("专项训练模块", payload["generation"]["function_paragraph"])
+
+    def test_short_or_blank_stack_is_not_invented(self):
+        self.assertIsNone(technology_features_text({"technology_stack": [
+            {"name": "Python", "usage": "用于实现摘要处理"},
+        ]}))
+        self.assertIsNone(technology_features_text({"technology_stack": [
+            {"name": "Python", "usage": "用于实现摘要处理"},
+            {"name": "", "usage": "用于定位输入文件"},
+            {"name": "argparse", "usage": "用于解析命令参数"},
+            {"name": "JSON", "usage": "用于组织处理结果"},
+            {"name": "UTF-8", "usage": "用于读取文本编码"},
+        ]}))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            short = business()
+            short["technology_stack"] = short["technology_stack"][:4]
+            (root / "facts.json").write_text(json.dumps(facts(), ensure_ascii=False), encoding="utf-8")
+            (root / "business.json").write_text(json.dumps(short, ensure_ascii=False), encoding="utf-8")
+            blocked = subprocess.run([
+                sys.executable, str(SCRIPTS / "generate_design_spec_content.py"),
+                "--facts", str(root / "facts.json"), "--business", str(root / "business.json"),
+                "--output", str(root / "spec.json"),
+            ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+            self.assertEqual(blocked.returncode, 2, blocked.stdout + blocked.stderr)
+            self.assertIn("PENDING_TECHNOLOGY_STACK=1", blocked.stdout)
+            self.assertFalse((root / "spec.json").exists())
+            (root / "analysis.json").write_text("{}", encoding="utf-8")
+            form = subprocess.run([
+                sys.executable, str(SCRIPTS / "generate_application_form.py"),
+                "--facts", str(root / "facts.json"), "--analysis", str(root / "analysis.json"),
+                "--business", str(root / "business.json"),
+                "--output", str(root / "application.txt"), "--model-output", str(root / "model.json"),
+            ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+            self.assertEqual(form.returncode, 2, form.stdout + form.stderr)
+            self.assertIn("PENDING_TECHNOLOGY_STACK=1", form.stdout)
+            self.assertFalse((root / "application.txt").exists())
 
     def test_hardware_comes_only_from_stated_environment(self):
         system, hardware, unspecified = environment_lines({

@@ -254,7 +254,18 @@ def prepare(paths: ProductPaths) -> int:
     synthesis = paths.work / "业务理解任务.md"
     synthesis.write_text("""# 模型业务理解任务
 
-Agent 读取 evidence-graph.json、project-analysis.json、README、路由、页面、服务、模型、测试、部署配置和真实运行结果，完成 business-understanding.json。不得只凭文件名下结论；每项 capability 必须带 evidence_ids，界面事实优先由运行结果确认。purpose 必须写清业务对象、动作和结果，禁止重复“用于支撑实际业务处理”等套话；按真实页面差异填写 inputs、outputs、business_rules、state_changes、result_fields 和 error_cases。本流程不生成操作手册。设计说明书另用可选 modules：每个模块含 name、summary、flow_narrative、screenshot_ids，界面下有多个独立子页面时写入 children；硬件最低配置写入 hardware_requirements，项目资料没有 CPU、内存或硬盘要求时留空，不要编造。未写 modules 时，设计说明书按 capabilities 逐项成节。该文件是内部工作件，不转交普通用户填写。
+Agent 读取 evidence-graph.json、project-analysis.json、README、路由、页面、服务、模型、测试、
+部署配置和真实运行结果，完成 business-understanding.json。不得只凭文件名下结论；
+每项 capability 必须带 evidence_ids，界面事实优先由运行结果确认。
+purpose 必须写清业务对象、动作和结果，禁止重复“用于支撑实际业务处理”等套话；
+按真实页面差异填写 inputs、outputs、business_rules、state_changes、result_fields 和 error_cases。
+technology_stack 至少写五项，只从 project-analysis.json 的语言、框架和依赖中选取，每项含 name 与 usage。
+usage 写这项技术在本软件中的作用，优先覆盖应用框架、界面框架、编程语言、数据存储，再补一项真实依赖。
+证据里没有的数据库或框架不写。设计说明书概述和申请表技术特点都由该清单拼接，不要另写一套技术特点。
+本流程不生成操作手册。设计说明书另用可选 modules：每个模块含 name、summary、flow_narrative、screenshot_ids，
+界面下有多个独立子页面时写入 children；硬件最低配置写入 hardware_requirements，
+项目资料没有 CPU、内存或硬盘要求时留空，不要编造。未写 modules 时，设计说明书按 capabilities 逐项成节。
+该文件是内部工作件，不转交普通用户填写。
 """, encoding="utf-8")
     screenshot_card, screenshot_task = write_screenshot_card(paths, analysis_data)
     record_stage(paths, state, "business_understanding", "needs_model_synthesis", hash_inputs([analysis, evidence]), [business, synthesis])

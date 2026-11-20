@@ -114,6 +114,13 @@ class QualityGateTests(unittest.TestCase):
                 "target_users": "测试员", "industry_domain": "软件服务", "development_environment": "Windows",
                 "development_tools": "Python 3.12", "runtime_platform": "Windows", "runtime_support": "Python",
                 "development_purpose": "验证外置规则的稳定性", "technical_features": "可追溯和确定性校验",
+                "technology_stack": [
+                    {"name": "Python", "usage": "用于实现字段校验"},
+                    {"name": "JSON", "usage": "用于保存字段规则"},
+                    {"name": "pathlib", "usage": "用于定位规则文件"},
+                    {"name": "argparse", "usage": "用于接收生成参数"},
+                    {"name": "UTF-8", "usage": "用于读写申请文本"},
+                ],
                 "main_functions": "本软件通过实际项目信息完成字段提取、格式校验、条件必填判断和结果输出。" * 16,
                 "capabilities": [],
             }
@@ -130,7 +137,14 @@ class QualityGateTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             data = json.loads(model.read_text(encoding="utf-8"))
             source_field = next(item for item in data["fields"] if item["key"] == "source_line_count")
+            features = next(item for item in data["fields"] if item["key"] == "technical_features")
             self.assertEqual(source_field["value"], "123")
+            self.assertEqual(
+                features["value"],
+                "系统采用Python用于实现字段校验，使用JSON用于保存字段规则，使用pathlib用于定位规则文件，"
+                "使用argparse用于接收生成参数，使用UTF-8用于读写申请文本。",
+            )
+            self.assertNotIn("可追溯和确定性校验", features["value"])
             self.assertIn("源程序量：123\n", output.read_text(encoding="utf-8"))
             self.assertNotIn("源程序量：123 行", output.read_text(encoding="utf-8"))
             self.assertTrue(data["live_limit_fields"])

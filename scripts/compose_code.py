@@ -299,6 +299,38 @@ def add_page_field(paragraph) -> None:
         run._r.append(node)
 
 
+def disable_snap_to_grid(p_pr) -> None:
+    """Keep exact line spacing from being stretched onto the document grid."""
+    snap = p_pr.find(qn("w:snapToGrid"))
+    if snap is None:
+        snap = OxmlElement("w:snapToGrid")
+        p_pr.append(snap)
+    snap.set(qn("w:val"), "0")
+
+
+def set_exact_line_grid(paragraph) -> None:
+    """One source row is one exact line, including a blank row."""
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    fmt.line_spacing = Twips(LINE_SPACING_TWIPS)
+    fmt.widow_control = False
+    disable_snap_to_grid(paragraph._p.get_or_add_pPr())
+
+
+def set_document_grid(section) -> None:
+    """Leave the document grid off. Pitch matches the line grid if an editor ignores the type."""
+    sect_pr = section._sectPr
+    grid = sect_pr.find(qn("w:docGrid"))
+    if grid is None:
+        grid = OxmlElement("w:docGrid")
+        sect_pr.append(grid)
+    grid.set(qn("w:type"), "default")
+    grid.set(qn("w:linePitch"), str(LINE_SPACING_TWIPS))
+    grid.set(qn("w:charSpace"), "0")
+
+
 def set_page_number_start(section, start: int) -> None:
     sect_pr = section._sectPr
     pg_num_type = sect_pr.find(qn("w:pgNumType"))
@@ -323,7 +355,13 @@ def set_run_font(run) -> None:
 
 
 def write_docx(path: Path, pages: list[list[str]], page_number_start: int = 1) -> None:
-    """Write code pages with an empty header and a centered footer page number."""
+    """Write code as one continuous exact line grid.
+
+    Pages are not separated with pageBreakBefore. A line inserted in Word
+    shifts the following rows by one line, so it cannot open a nearly blank
+    page in front of the next hard break. Unedited output still lands on the
+    same page count, because each row is exactly one 14.25 pt line.
+    """
     doc = Document()
     section = doc.sections[0]
     section.page_width = Mm(PAGE_WIDTH_MM)
@@ -336,6 +374,7 @@ def write_docx(path: Path, pages: list[list[str]], page_number_start: int = 1) -
     section.footer_distance = Mm(17.5)
     section.different_first_page_header_footer = False
     set_page_number_start(section, page_number_start)
+    set_document_grid(section)
     normal = doc.styles["Normal"]
     normal.font.name = ASCII_FONT
     normal.font.size = Pt(FONT_SIZE_PT)
@@ -349,6 +388,7 @@ def write_docx(path: Path, pages: list[list[str]], page_number_start: int = 1) -
     normal.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
     normal.paragraph_format.line_spacing = Twips(LINE_SPACING_TWIPS)
     normal.paragraph_format.widow_control = False
+    disable_snap_to_grid(normal.element.get_or_add_pPr())
 
     header = section.header.paragraphs[0]
     header.text = ""
@@ -364,11 +404,10 @@ def write_docx(path: Path, pages: list[list[str]], page_number_start: int = 1) -
     dash_after = footer.add_run(" -")
     set_run_font(dash_after)
 
-    for page_index, lines in enumerate(pages):
-        for line_index, line in enumerate(lines):
+    for lines in pages:
+        for line in lines:
             paragraph = doc.add_paragraph()
-            if page_index and not line_index:
-                paragraph.paragraph_format.page_break_before = True
+            set_exact_line_grid(paragraph)
             if line:
                 set_run_font(paragraph.add_run(line))
     doc.save(path)
@@ -501,7 +540,7 @@ def main() -> int:
         "rows_per_page": ROWS_PER_PAGE,
         "margins_mm": {"top": MARGIN_TOP_MM, "bottom": MARGIN_BOTTOM_MM,
                        "left": MARGIN_LEFT_MM, "right": MARGIN_RIGHT_MM},
-        "pagination": "page_break_before",
+        "pagination": "continuous_exact_line_grid",
         "line_policy": "original lines retained, including blanks; long lines wrap on measured Calibri/SimSun advances without dropping characters",
         "advance": "measured" if ascii_metrics_loaded() else "fallback_11pt",
         "header": "none",

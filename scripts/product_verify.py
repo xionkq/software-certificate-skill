@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from common import load_json, now_iso, save_json, sha256_file
+from generate_design_spec_content import technology_features_text
 from product_model import find_slots, safe_filename
 
 
@@ -175,7 +176,8 @@ def main() -> int:
     if architecture == "frontend_only":
         described = " ".join(str(business.get(key, "")) for key in
                              ("runtime_support", "runtime_platform", "main_functions",
-                              "technical_features", "software_purpose"))
+                              "software_purpose"))
+        described = f"{described} {technology_features_text(business) or ''}"
         acknowledged = bool(re.search(r"后端|服务端|服务器|接口|API", described))
         checks.append(check("申请范围与源码架构一致", acknowledged,
                             "纯前端仓库：材料仅含前端源码，申请表已注明需配合后端/接口服务" if acknowledged

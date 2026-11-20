@@ -16,6 +16,8 @@ SECTION_TITLES = ("1.软件概述", "2.运行环境", "3.主要功能", "4.使�
 HARDWARE_HINT = re.compile(r"CPU|处理器|内存|硬盘|磁盘|显卡", re.IGNORECASE)
 GENERIC_HARDWARE = "满足上述系统需求的通用计算机"
 FIGURE_TOKEN = re.compile(r"【图\d+】")
+MIN_TECHNOLOGY_STACK = 5
+USAGE_PREFIXES = ("用于", "作为", "实现", "编写", "存储", "提供", "负责", "完成")
 
 
 def text_list(value: Any) -> list[str]:
@@ -67,19 +69,38 @@ def environment_lines(business: dict[str, Any]) -> tuple[str, str, bool]:
     return system, GENERIC_HARDWARE, True
 
 
+def technology_features_text(business: dict[str, Any]) -> str | None:
+    """Join a confirmed stack into one sentence shared by the spec and the form.
+
+    The first item follows 系统采用 directly. Later items start with 使用.
+    A usage phrase that does not already start with a role verb gets 用于.
+    Fewer than five named items, or a blank name or usage, returns None.
+    """
+    raw = business.get("technology_stack")
+    if not isinstance(raw, list) or len(raw) < MIN_TECHNOLOGY_STACK:
+        return None
+    parts: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None
+        name = clean(item.get("name"))
+        usage = clean(item.get("usage"))
+        if not name or not usage:
+            return None
+        if not any(usage.startswith(prefix) for prefix in USAGE_PREFIXES):
+            usage = f"用于{usage}"
+        piece = f"{name}{usage}"
+        parts.append(piece if index == 0 else f"使用{piece}")
+    return f"系统采用{'，'.join(parts)}。"
+
+
 def overview_text(facts: dict[str, Any], business: dict[str, Any]) -> str:
     name = clean(facts.get("software_full_name"))
     users = clean(business.get("target_users")) or "实际使用者"
     purpose = clean(business.get("software_purpose")) or "完成软件提供的业务处理"
     goal = clean(business.get("development_purpose")) or purpose
-    tech = clean(business.get("technical_features")) or "项目中已经实现的处理方式"
-    domain = clean(business.get("industry_domain")) or "相应业务领域"
-    if tech.startswith("系统采用") or tech.startswith("采用"):
-        tech_sentence = tech
-    else:
-        tech_sentence = f"系统采用{tech}"
-    return (f"本系统是面向{users}的{name}，主要用于{purpose}，旨在{goal}。"
-            f"{tech_sentence}。本系统的定位为{domain}。")
+    tech = technology_features_text(business) or ""
+    return f"本系统是面向{users}的{name}，主要用于{purpose}。{tech}本系统旨在{goal}。"
 
 
 def bind_figure_refs(text: str, numbers: list[int]) -> str:
@@ -343,6 +364,9 @@ def main() -> int:
     slots = find_slots({"facts": facts, "business": business})
     if slots:
         print(f"PENDING_SLOTS={len(slots)}")
+        return 2
+    if technology_features_text(business) is None:
+        print("PENDING_TECHNOLOGY_STACK=1")
         return 2
     if not resolve_modules(business):
         print("PENDING_MODULES=1")

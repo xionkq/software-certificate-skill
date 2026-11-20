@@ -92,7 +92,11 @@ class SourceLineTests(unittest.TestCase):
             self.assertIn("PAGE", footer)
             self.assertIn("Calibri", document)
             self.assertIn('w:val="21"', document)
-            self.assertIn("pageBreakBefore", document)
+            self.assertNotIn("pageBreakBefore", document)
+            self.assertIn('w:line="285"', document)
+            self.assertIn('w:lineRule="exact"', document)
+            self.assertIn("snapToGrid", document)
+            self.assertNotIn('w:type="lines"', document)
 
     def test_installed_calibri_keeps_a_normal_use_line_together(self):
         sys.path.insert(0, str(SCRIPTS))

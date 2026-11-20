@@ -10,6 +10,13 @@
   "runtime_support": "【由模型结合项目证据填写】",
   "main_functions": "【由模型基于已确认功能综合填写】",
   "technical_features": "【由模型结合真实实现填写】",
+  "technology_stack": [
+    {"name": "【待填写】", "usage": "【待填写】"},
+    {"name": "【待填写】", "usage": "【待填写】"},
+    {"name": "【待填写】", "usage": "【待填写】"},
+    {"name": "【待填写】", "usage": "【待填写】"},
+    {"name": "【待填写】", "usage": "【待填写】"}
+  ],
   "startup": "【由模型结合实际启动方式填写】",
   "interface_structure": "【由模型结合真实界面填写】",
   "workflow_summary": "【由模型结合真实操作结果填写】",
