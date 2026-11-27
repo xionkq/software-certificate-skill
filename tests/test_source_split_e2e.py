@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -15,20 +13,6 @@ from pypdf import PdfReader
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-
-
-def explicit_docx_pages(path: Path) -> int:
-    """Page count implied by the continuous exact line grid."""
-    sys.path.insert(0, str(SCRIPTS))
-    from compose_code import ROWS_PER_PAGE
-    with zipfile.ZipFile(path) as archive:
-        xml = archive.read("word/document.xml").decode("utf-8", "replace")
-    if "pageBreakBefore" in xml:
-        raise AssertionError("code volume must flow continuously, without pageBreakBefore")
-    paragraphs = len(re.findall(r"<w:p(?:\s|>)", xml))
-    if paragraphs <= 0:
-        return 0
-    return (paragraphs + ROWS_PER_PAGE - 1) // ROWS_PER_PAGE
 
 
 @unittest.skipUnless(os.environ.get("RUN_DOCUMENT_E2E") == "1", "set RUN_DOCUMENT_E2E=1 with LibreOffice available")
@@ -79,7 +63,6 @@ class SourceSplitEndToEndTests(unittest.TestCase):
                     "--expected-pages", str(expected), "--timeout-seconds", "240",
                 ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=420)
                 self.assertEqual(conversion.returncode, 0, conversion.stdout + conversion.stderr)
-                self.assertEqual(explicit_docx_pages(docx), expected)
                 self.assertEqual(len(PdfReader(str(pdf)).pages), expected)
                 model = json.loads(report.read_text(encoding="utf-8"))
                 self.assertEqual(model["pdf_pages"], expected)

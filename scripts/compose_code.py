@@ -354,13 +354,12 @@ def set_run_font(run) -> None:
     fonts.set(qn("w:eastAsia"), EAST_ASIA_FONT)
 
 
-def write_docx(path: Path, pages: list[list[str]], page_number_start: int = 1) -> None:
-    """Write code as one continuous exact line grid.
+def write_docx(path: Path, lines: list[str], page_number_start: int = 1) -> None:
+    """Write one paragraph per source line and let Word wrap the paragraph.
 
-    Pages are not separated with pageBreakBefore. A line inserted in Word
-    shifts the following rows by one line, so it cannot open a nearly blank
-    page in front of the next hard break. Unedited output still lands on the
-    same page count, because each row is exactly one 14.25 pt line.
+    Page count is computed from wrapped visual rows, not from these paragraphs.
+    A line or two of difference against Word is accepted and is not recorded.
+    Pages are not separated with pageBreakBefore.
     """
     doc = Document()
     section = doc.sections[0]
@@ -404,12 +403,11 @@ def write_docx(path: Path, pages: list[list[str]], page_number_start: int = 1) -
     dash_after = footer.add_run(" -")
     set_run_font(dash_after)
 
-    for lines in pages:
-        for line in lines:
-            paragraph = doc.add_paragraph()
-            set_exact_line_grid(paragraph)
-            if line:
-                set_run_font(paragraph.add_run(line))
+    for line in lines:
+        paragraph = doc.add_paragraph()
+        set_exact_line_grid(paragraph)
+        if line:
+            set_run_font(paragraph.add_run(line))
     doc.save(path)
 
 
@@ -425,21 +423,21 @@ def load_source_files(root: Path, files: list[Path], sides: dict[str, str]) -> t
         rel = relative_posix(path, root)
         original_lines = text.splitlines()
         visual: list[str] = []
+        output_lines: list[str] = []
         mapping: list[dict] = []
         digest = sha256_file(path)
         for original_no, original in enumerate(original_lines, 1):
             if not original.strip():
                 blank_lines += 1
-            segments = wrap_source_line(original)
-            for segment_no, segment in enumerate(segments, 1):
-                visual.append(segment)
-                mapping.append({
-                    "file": rel,
-                    "file_sha256": digest,
-                    "source_line": original_no,
-                    "segment": segment_no,
-                    "source_text": original.expandtabs(4),
-                })
+            expanded = original.expandtabs(4)
+            visual.extend(wrap_source_line(original))
+            output_lines.append(expanded)
+            mapping.append({
+                "file": rel,
+                "file_sha256": digest,
+                "source_line": original_no,
+                "source_text": expanded,
+            })
         if not visual:
             continue
         record = {
@@ -449,6 +447,7 @@ def load_source_files(root: Path, files: list[Path], sides: dict[str, str]) -> t
             "original_lines": len(original_lines),
             "visual_rows": len(visual),
             "visual": visual,
+            "output_lines": output_lines,
             "mapping": mapping,
         }
         if len(visual) > MAX_VOLUME_ROWS:
@@ -465,12 +464,13 @@ def load_source_files(root: Path, files: list[Path], sides: dict[str, str]) -> t
 
 
 def assign_output_lines(files: list[dict]) -> tuple[list[str], list[dict]]:
+    """Number the paragraphs written to DOCX, one per original source line."""
     lines: list[str] = []
     mapping: list[dict] = []
     for record in files:
         record["output_start_line"] = len(lines) + 1
-        for segment, meta in zip(record["visual"], record["mapping"]):
-            lines.append(segment)
+        for source_line, meta in zip(record["output_lines"], record["mapping"]):
+            lines.append(source_line)
             published = dict(meta)
             published["output_line"] = len(lines)
             mapping.append(published)
@@ -478,14 +478,23 @@ def assign_output_lines(files: list[dict]) -> tuple[list[str], list[dict]]:
     return lines, mapping
 
 
-def volume_payload(files: list[dict], page_number_start: int) -> dict:
+def collect_visual_rows(files: list[dict]) -> list[str]:
     rows: list[str] = []
     for record in files:
         rows.extend(record["visual"])
+    return rows
+
+
+def volume_payload(files: list[dict], page_number_start: int) -> dict:
+    rows = collect_visual_rows(files)
+    source_lines: list[str] = []
+    for record in files:
+        source_lines.extend(record["output_lines"])
     pages = paginate_rows(rows)
     return {
         "files": [record["path"] for record in files],
         "pages": pages,
+        "source_lines": source_lines,
         "page_count": len(pages),
         "page_number_start": page_number_start,
         "visual_rows": len(rows),
@@ -525,7 +534,7 @@ def main() -> int:
     lines, mapping = assign_output_lines(placeable)
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    full_pages = paginate_rows(lines)
+    full_pages = paginate_rows(collect_visual_rows(placeable))
     full_txt = output / "source-full.txt"
     write_txt(full_txt, full_pages)
     choice = choose_filing_volumes(placeable)
@@ -541,7 +550,7 @@ def main() -> int:
         "margins_mm": {"top": MARGIN_TOP_MM, "bottom": MARGIN_BOTTOM_MM,
                        "left": MARGIN_LEFT_MM, "right": MARGIN_RIGHT_MM},
         "pagination": "continuous_exact_line_grid",
-        "line_policy": "original lines retained, including blanks; long lines wrap on measured Calibri/SimSun advances without dropping characters",
+        "line_policy": "page count uses measured Calibri/SimSun wraps; DOCX keeps one paragraph per source line and leaves wrapping to Word",
         "advance": "measured" if ascii_metrics_loaded() else "fallback_11pt",
         "header": "none",
         "footer": "centered page number, - n -",
@@ -600,7 +609,7 @@ def main() -> int:
         txt_path = output / f"source-{key}.txt"
         docx_path = output / f"source-{key}.docx"
         write_txt(txt_path, payload["pages"])
-        write_docx(docx_path, payload["pages"], payload["page_number_start"])
+        write_docx(docx_path, payload["source_lines"], payload["page_number_start"])
         artifacts[f"{key}_txt"] = {"path": str(txt_path), "sha256": sha256_file(txt_path)}
         artifacts[f"{key}_docx"] = {"path": str(docx_path), "sha256": sha256_file(docx_path)}
         filing_groups[key] = {

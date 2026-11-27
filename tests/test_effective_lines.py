@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -20,6 +21,16 @@ def write_manifest(project: Path, ordered: list[str]) -> Path:
                    "open_source_boundary_checked": True, "generated_code_boundary_checked": True,
                    "secret_scan_checked": True}}, ensure_ascii=False), encoding="utf-8")
     return manifest
+
+
+def paragraph_texts(docx_path: Path) -> list[str]:
+    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(docx_path) as archive:
+        root = ET.fromstring(archive.read("word/document.xml"))
+    texts = []
+    for paragraph in root.iter(namespace + "p"):
+        texts.append("".join(node.text or "" for node in paragraph.iter(namespace + "t")))
+    return texts
 
 
 def compose(project: Path, manifest: Path, output: Path) -> subprocess.CompletedProcess[str]:
@@ -60,6 +71,10 @@ class SourceLineTests(unittest.TestCase):
             project.mkdir()
             ordered = []
             marker = "TOKEN_" + ("A" * 180) + "_END"
+            long_line = (
+                "                    error != null -> Box(Modifier.fillMaxSize().padding(24.dp), "
+                "contentAlignment = Alignment.Center) {"
+            )
             for index in range(80):
                 relative = f"src/service_{index:03d}.py"
                 path = project / relative
@@ -67,6 +82,7 @@ class SourceLineTests(unittest.TestCase):
                 lines = [f"value_{index}_{line} = process_item({line})" for line in range(80)]
                 if index == 0:
                     lines[0] = marker
+                    lines[1] = long_line
                 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
                 ordered.append(relative)
             compose_result = compose(project, write_manifest(project, ordered), output)
@@ -83,6 +99,11 @@ class SourceLineTests(unittest.TestCase):
             self.assertEqual(back["page_number_start"], front["page_count"] + 1)
             flat = (output / "source-full.txt").read_text(encoding="utf-8").replace("\n", "").replace("\f", "")
             self.assertIn(marker, flat)
+            source_file = next(item for item in provenance["files"] if item["path"] == "src/service_000.py")
+            self.assertGreater(source_file["visual_rows"], source_file["original_lines"])
+            paragraphs = paragraph_texts(output / "source-front.docx")
+            self.assertIn(marker, paragraphs)
+            self.assertIn(long_line, paragraphs)
             with zipfile.ZipFile(output / "source-front.docx") as archive:
                 document = archive.read("word/document.xml").decode("utf-8")
                 header = archive.read("word/header1.xml").decode("utf-8")
